@@ -9,6 +9,7 @@ import random as _rand
 import urllib
 import requests
 import shutil
+import codecs
 
 from bs4 import BeautifulSoup
 from fake_useragent import UserAgent
@@ -38,7 +39,7 @@ def main():
     parser.add_argument("tags", type=str,
                          help="Enter the tags you want to scrape.\nAt least 1 tag argument is required.", 
                          nargs='+',)
-    parser.add_argument("-e", "--exclude", type=str, help="Enter tags you want to avoid (Optional)",
+    parser.add_argument("-e", "--exclude", type=str, help="Enter tags you want to avoid.",
                         nargs='*', default=None)
     parser.add_argument("-d", "--dir", help="The directory you want the images saved to.", nargs = '?')
     parser.add_argument("-p", "--page", type=int, help="Page you want to start the scraping on", default=1, nargs='?')
@@ -65,13 +66,21 @@ def main():
     print('Exclude tags:', args.exclude)
     print('Save images to:', save_path)
     print('Start on page:', args.page)
-    print(args)
 
     id_regex = re.compile(r'(?<=thumbnail_)([\da-f]*\.jpg|\.png|\.gif)')
     referer_regex = re.compile(r'\?[\da-f]*')
-    include_tags= ''.join('%s+' % x for x in args.tags)[:-1]
+    temp_include = []
+    for tag in args.tags:
+        temp_include.append(urllib.parse.quote(tag))
+
+    include_tags= ''.join('%s+' % x for x in temp_include)[:-1]
+
     if args.exclude is not None:
-        exclude_tags = ''.join('+-%s' % x for x in args.exclude)
+        temp_exclude = []
+        for tag in args.exclude:
+            temp_exclude.append(urllib.parse.quote(tag))
+            
+        exclude_tags = ''.join('+-%s' % x for x in temp_exclude)
     else:
         exclude_tags = ''
 
@@ -85,7 +94,7 @@ def main():
         time.sleep(delay)
         scrape_url = main_url_base.format(url_tags=url_tags,pid=str(42* (page-1)))
         scrape_soup = get_soup(scrape_url)
-        print(scrape_url)
+        print('Scraping: {0}, (page {1})'.format(scrape_url, page))
         results = scrape_soup.findAll('img', class_='preview')
         if len(results) > 0:
             for result in results:
@@ -94,11 +103,10 @@ def main():
 
                 if args.kwcount != 0:
                     for tag in result.attrs['alt'].split():
-                        if tag not in args.tags:
-                            if tag in related_tags:
-                                related_tags[tag] += 1
-                            else:
-                                related_tags[tag] = 1
+                        if tag in related_tags:
+                            related_tags[tag] += 1
+                        else:
+                            related_tags[tag] = 1
                 img_fn = id_regex.search(result.attrs['src']).group(1)
                 refer_id = referer_regex.search(result.attrs['src']).group(0)
                 current = grab_url_base.format(img_fn[:2],img_fn[2:4],img_fn)
@@ -119,11 +127,14 @@ def main():
                                 image.close()
                             except OSError as e:
                                 pass
-                    else: # Probably another file name
-                        alt_extensions = ('png', 'jpeg')
+                    else: # Probably another file extension
+                        alt_extensions = ('.jpeg', '.png', '.gif', '.webm',)
+                        base = current.replace('.', '__dot__', 1)
+                        base = base.split('.')[0]
+                        base = base.replace('__dot__', '.', 1)
                         for alt in alt_extensions:
                             try:
-                                current = current[:-3]+alt
+                                current = base+alt
                                 response = sess.get(current, data=None, headers={
                                                 'User-Agent': UserAgent().firefox,
                                                 'Referer': referer_base.format(refer_id),
@@ -135,7 +146,6 @@ def main():
                                             image.save(save_directory)
                                             image.close()
                                             break
-                                
                             except OSError as e:
                                 pass
                 print(current)
@@ -152,9 +162,9 @@ def main():
     if args.kwcount == -1:
         args.kwcount = len(sorted_related_tags)
     if args.keywordfile:
-        with open(save_path + 'keywords.txt', 'a') as kwf:
+        with codecs.open(save_path + '\\keywords.txt', 'w', encoding="utf8") as kwf:
                 for tag in sorted_related_tags[:args.kwcount]:
-                    kwf.write('{0} : {1}'.format(tag, related_tags[tag]))
+                    kwf.write(u'{0} : {1}\n'.format(tag, related_tags[tag]))
     else:
         for tag in sorted_related_tags[:args.kwcount]:
             print(tag, related_tags[tag])
