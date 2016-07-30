@@ -154,7 +154,7 @@ def main():
     if args.keywordfile:
         with open(save_path + 'keywords.txt', 'a') as kwf:
                 for tag in sorted_related_tags[:args.kwcount]:
-                    kwf.write(tag, related_tags[tag])
+                    kwf.write('{0} : {1}'.format(tag, related_tags[tag]))
     else:
         for tag in sorted_related_tags[:args.kwcount]:
             print(tag, related_tags[tag])
