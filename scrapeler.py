@@ -38,7 +38,7 @@ def get_soup(url):
 def parse_scrapeler_args():
     scrapeler_args = {}
     
-    parser = argparse.ArgumentParser(description='Scrape a booru-style image database. At least one tag is required to scrape. It\'s recommended you give one specific tag. Scrapeler will not scrape more than 100 pages at once.')
+    parser = argparse.ArgumentParser(description='Scrape a booru-style image database. At least one tag is required to scrape. It\'s recommended you give one specific tag to avoid flooding yourself with images you don\' want. Scrapeler will not scrape more than 100 pages at once.')
     parser.add_argument("tags", type=str,
                          help="Enter the tags you want to scrape.\nAt least 1 tag argument is required.", 
                          nargs='+',)
@@ -50,6 +50,9 @@ def parse_scrapeler_args():
                         help="The number of counted keywords reported. Defaults to 25. If this is 0, Scrapeler will not count keywords. Set this to -1 to grab all related keywords.")
     parser.add_argument("-f", "--keywordfile", default=False, action='store_true',
                         help="Whether or not to store keyword counts in a file. If not specified, Scrapeler will report to the console.")
+    parser.add_argument("--pagelimit", type=int, default=-1, help='How many pages to scan before stopping. If below 1, Scrapeler will continue until it finds a page with fewer than maximum images.')
+    parser.add_argument("--sleep", default=False, action='store_true', help='If on, Scrapeler will sleep randomly trying to disguise itself.')
+    parser.add_argument("--randompagelimit", default=False, action='store_true', help='If on, Scrapeler will stop when it finds no more images or randomly between 10 and 30 pages.')
     parser.add_argument("--scanonly", default=False, action='store_true', help='If on, images will not be saved, but you still collect keyword data.')
     parser.add_argument("--patient", default=False, action='store_true', help='If on, the minimum delay between url requests will be increased by 3 seconds. Better if you have a slow connection') 
     parser.add_argument("--aggressive", default=False, action='store_true', help='If on, the minimum delay between url requests will be reduced by 2 seconds. Don\'t get banned!')
@@ -95,6 +98,12 @@ def parse_scrapeler_args():
     scrapeler_args['kwcount'] = args.kwcount if args.kwcount >= -1 else 0
     scrapeler_args['scanonly'] = args.scanonly
     scrapeler_args['base_delay'] = base_delay
+    scrapeler_args['sleep'] = args.sleep
+    if args.randompagelimit:
+        scrapeler_args['pagelimit'] = _rand.randint(10,30)
+    else:
+        scrapeler_args['pagelimit'] = args.pagelimit if args.pagelimit > 0 else -1
+
     
     return scrapeler_args
 
@@ -152,16 +161,20 @@ def scrape_booru(scrapeler_args):
     related_tags = {}
     page = scrapeler_args['page']
     url_tags = scrapeler_args['url_tags']
+    if scrapeler_args['sleep']:
+        next_sleep = _rand.randint(3600, 10800)  # 1 to 3 hours til sleeping.
+        print('Will sleep in {0} seconds'.format(next_sleep))
     keep_scraping = True
     
     while keep_scraping:
+        timestamp = datetime.datetime.now()
         delay = scrapeler_args['base_delay'] + _rand.uniform(2,4)
         time.sleep(delay)
         scrape_url = main_url_base.format(url_tags=url_tags ,pid=str(42* (page-1)))
         scrape_soup = get_soup(scrape_url)
         print('Scraping: {0}, (page {1})'.format(scrape_url, page))
         results = scrape_soup.findAll('img', class_='preview')
-        if not len(results) > 0:
+        if len(results) < 42:
             keep_scraping = False
         
         for result in results:
@@ -186,11 +199,21 @@ def scrape_booru(scrapeler_args):
 
             # todo if you scrape and find this tag: <title>Gelbooru - Intermission Ad</title>
             # wait 15 seconds then try the page again
-        page+= 1
-        if page - scrapeler_args['page'] > 100:
+        if 0 < scrapeler_args['pagelimit'] < scrapeler_args['page'] - page:
             keep_scraping = False
 
-            
+        page+= 1
+        if keep_scraping and scrapeler_args['sleep']:
+            rn = datetime.datetime.now()
+            if rn - timestamp > datetime.timedelta(seconds=next_sleep):
+                delay = _rand.randint(7200, 14400) + _rand.uniform(0,1)  #2 to 4 hours of sleeping.
+                while datetime.datetime.now() < rn + datetime.timedelta(seconds=delay):
+                    time.sleep(120)
+                    print('Sleeping...')
+                timestamp = datetime.datetime.now()
+                next_sleep = _rand.randint(3600, 10800)  # 1 to 3 hours til sleeping.
+                print('Will sleep in {0} seconds'.format(next_sleep))
+
     return related_tags
     
     
