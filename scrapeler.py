@@ -9,6 +9,7 @@ import random as _rand
 import urllib
 import requests
 import codecs
+import sys
 
 from bs4 import BeautifulSoup
 from fake_useragent import UserAgent
@@ -38,7 +39,7 @@ def get_soup(url):
             return None
 
 
-def parse_scrapeler_args():
+def parse_scrapeler_args(batch_args=None):
     scrapeler_args = {}
 
     parser = argparse.ArgumentParser(description='Scrape a booru-style image database. At least one tag is required to scrape. It\'s recommended you give one specific tag to avoid flooding yourself with images you don\' want. Scrapeler will not scrape more than 100 pages at once.')
@@ -59,8 +60,13 @@ def parse_scrapeler_args():
     parser.add_argument("--scanonly", default=False, action='store_true', help='If on, images will not be saved, but you still collect keyword data.')
     parser.add_argument("--patient", default=False, action='store_true', help='If on, the minimum delay between url requests will be increased by 3 seconds. Better if you have a slow connection')
     parser.add_argument("--aggressive", default=False, action='store_true', help='If on, the minimum delay between url requests will be reduced by 2 seconds. Don\'t get banned!')
+    parser.add_argument("--batch", default=None, type=argparse.FileType('r'))
 
-    args = parser.parse_args()
+    if not batch_args:
+        args = parser.parse_args()
+    else:
+        args = parser.parse_args(batch_args.split())
+        assert args.batch is None
 
     if args.dir is not None:
         directory = args.dir
@@ -70,7 +76,7 @@ def parse_scrapeler_args():
         save_path= os.path.abspath(directory)
 
     if not os.path.exists(save_path):
-        os.mkdir(save_path)
+        os.makedirs(save_path)
 
     temp_include = []
     for tag in args.tags:
@@ -102,6 +108,8 @@ def parse_scrapeler_args():
     scrapeler_args['scanonly'] = args.scanonly
     scrapeler_args['base_delay'] = base_delay
     scrapeler_args['sleep'] = args.sleep
+    scrapeler_args['batch'] = args.batch
+
     if args.randompagelimit:
         scrapeler_args['pagelimit'] = _rand.randint(10,30)
     else:
@@ -163,6 +171,7 @@ def scrape_booru(scrapeler_args):
         next_sleep = _rand.randint(3600, 10800)  # 1 to 3 hours til sleeping.
         print('Will sleep in {0} seconds'.format(next_sleep))
     keep_scraping = True
+    start_page = scrapeler_args['page']
 
     while keep_scraping:
         timestamp = datetime.datetime.now()
@@ -194,10 +203,10 @@ def scrape_booru(scrapeler_args):
 
                 # todo if you scrape and find this tag: <title>Gelbooru - Intermission Ad</title>
                 # wait 15 seconds then try the page again
-        if 0 < scrapeler_args['pagelimit'] < scrapeler_args['page'] - page:
+        page += 1
+        if 0 < scrapeler_args['pagelimit'] < page - start_page:
             keep_scraping = False
 
-        page += 1
         if keep_scraping and scrapeler_args['sleep']:
             rn = datetime.datetime.now()
             if rn - timestamp > datetime.timedelta(seconds=next_sleep):
@@ -212,8 +221,8 @@ def scrape_booru(scrapeler_args):
     return related_tags
 
 
-def main():
-    scrapeler_args = parse_scrapeler_args()
+def perform(scrapeler_args):
+
     print('\nArguments parsed as:')
     print('Include tags:', scrapeler_args['tags'])
     print('Exclude tags:', scrapeler_args['exclude'])
@@ -240,6 +249,20 @@ def main():
     else:
         for tag in sorted_related_tags[:kwcount]:
             print(tag, related_tags[tag])
+
+
+def main():
+    scrapeler_args = parse_scrapeler_args()
+
+    if scrapeler_args['batch']:
+        batchfile = scrapeler_args['batch']
+        for line in batchfile:
+            try:
+                perform(parse_scrapeler_args(line))
+            except Exception as e:
+                print(e)
+    else:
+        perform(scrapeler_args)
 
 
 if __name__ == '__main__':
