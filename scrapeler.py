@@ -19,14 +19,18 @@ main_url_base = r'http://gelbooru.com/index.php?page=post&s=list&tags={url_tags}
 grab_url_base = r'http://gelbooru.com//images/{0}/{1}/{2}'
 referer_base = r'http://gelbooru.com/index.php?page=post&s=view&id={0}'
 
+id_regex = re.compile(r'(?<=thumbnail_)([\da-f]*\.jpg|\.png|\.gif)')
+referer_regex = re.compile(r'\?[\da-f]*')
+
+
 def get_soup(url):
     with requests.Session() as sess:
         response = sess.get(url, data=None, headers={
             'User-Agent': UserAgent().random,
             'Accept': '''text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8''',
             'Connection': 'keep-alive',
-            }
-        )
+        }
+                            )
         if response.status_code == 200:
             return BeautifulSoup(response.text, "html5lib")
         else:
@@ -34,14 +38,13 @@ def get_soup(url):
             return None
 
 
-
 def parse_scrapeler_args():
     scrapeler_args = {}
-    
+
     parser = argparse.ArgumentParser(description='Scrape a booru-style image database. At least one tag is required to scrape. It\'s recommended you give one specific tag to avoid flooding yourself with images you don\' want. Scrapeler will not scrape more than 100 pages at once.')
     parser.add_argument("tags", type=str,
-                         help="Enter the tags you want to scrape.\nAt least 1 tag argument is required.", 
-                         nargs='+',)
+                        help="Enter the tags you want to scrape.\nAt least 1 tag argument is required.",
+                        nargs='+',)
     parser.add_argument("-e", "--exclude", type=str, help="Enter tags you want to avoid.",
                         nargs='*', default=None)
     parser.add_argument("-d", "--dir", help="The directory you want the images saved to.", nargs = '?')
@@ -54,7 +57,7 @@ def parse_scrapeler_args():
     parser.add_argument("--sleep", default=False, action='store_true', help='If on, Scrapeler will sleep randomly trying to disguise itself.')
     parser.add_argument("--randompagelimit", default=False, action='store_true', help='If on, Scrapeler will stop when it finds no more images or randomly between 10 and 30 pages.')
     parser.add_argument("--scanonly", default=False, action='store_true', help='If on, images will not be saved, but you still collect keyword data.')
-    parser.add_argument("--patient", default=False, action='store_true', help='If on, the minimum delay between url requests will be increased by 3 seconds. Better if you have a slow connection') 
+    parser.add_argument("--patient", default=False, action='store_true', help='If on, the minimum delay between url requests will be increased by 3 seconds. Better if you have a slow connection')
     parser.add_argument("--aggressive", default=False, action='store_true', help='If on, the minimum delay between url requests will be reduced by 2 seconds. Don\'t get banned!')
 
     args = parser.parse_args()
@@ -79,7 +82,7 @@ def parse_scrapeler_args():
         temp_exclude = []
         for tag in args.exclude:
             temp_exclude.append(urllib.parse.quote(tag))
-            
+
         exclude_tags = ''.join('-%s+' % urllib.parse.quote(x) for x in temp_exclude)
     else:
         exclude_tags = ''
@@ -87,7 +90,7 @@ def parse_scrapeler_args():
     base_delay = 3
     if args.patient: base_delay += 3
     if args.aggressive: base_delay -= 2
-    
+
 
     scrapeler_args['tags'] = args.tags
     scrapeler_args['exclude'] = args.exclude
@@ -104,16 +107,41 @@ def parse_scrapeler_args():
     else:
         scrapeler_args['pagelimit'] = args.pagelimit if args.pagelimit > 0 else -1
 
-    
     return scrapeler_args
 
 
-def save_image(save_to, current_img, referer_id):
+def route_through_subpage(directory_page, referer_id, image_file_path):
+    with requests.Session() as sess:
+        response = sess.get(referer_id, data=None, headers={
+            'User-Agent': UserAgent().firefox,
+            'Referer': directory_page,
+        })
+    if not response.status_code == 404:
+        soup = BeautifulSoup(response.content, "html5lib", from_encoding=response.encoding)
+        try:
+            img_tag = soup.find('img', id='image')
+            current_img = img_tag.attrs['src']
+
+            # this logic is fucked by I don't care
+            extension = current_img.split('?')[0][-5:].split('.')[1]
+            # image file path always starts life as a .jpg
+            image_file_path = image_file_path[:-3] + extension
+
+            if not os.path.exists(image_file_path):
+                save_image(referer_id, current_img, image_file_path)
+        except Exception as e:
+            print(e)
+
+def save_image(referer_id, current_img, save_to):
+
+    if 'sample' in current_img:
+        current_img = current_img.replace('samples', 'images').replace('sample_', '')
+
     with requests.Session() as sess:
         response = sess.get(current_img, data=None, headers={
-                            'User-Agent': UserAgent().firefox,
-                            'Referer': referer_id,
-                            })
+            'User-Agent': UserAgent().firefox,
+            'Referer': referer_id,
+        })
         if not response.status_code == 404:
             b = BytesIO(response.content)
             try:
@@ -122,42 +150,12 @@ def save_image(save_to, current_img, referer_id):
                 image.close()
                 print(current_img)
             except Exception as e:
+                print(e)
                 pass
-
-        else: # Probably another file extension
-            alt_extensions = ('.jpeg', '.png', '.gif', '.webm',)
-            base_url = current_img.replace('.', '__dot__', 1)
-            base_url = base_url.split('.')[0]
-            base_url = base_url.replace('__dot__', '.', 1)
-
-            base_save = save_to.split('.')[0]
-            for ext in alt_extensions:
-                delay = _rand.uniform(2,4)
-                time.sleep(delay)
-                try:
-                    current_img = base_url+ext
-                    response = sess.get(current_img, data=None, headers={
-                                    'User-Agent': UserAgent().random,
-                                    'Referer': referer_id,
-                                    })
-
-                    if not response.status_code == 404:
-                        if not os.path.isfile(base_save+ext):
-                            b = BytesIO(response.content)
-                            image = Image.open(b)
-                            image.save(base_save+ext)
-                            image.close()
-                            print(current_img)
-                        break
-                        
-                except Exception as e:
-                    pass
 
 
 def scrape_booru(scrapeler_args):
 
-    id_regex = re.compile(r'(?<=thumbnail_)([\da-f]*\.jpg|\.png|\.gif)')
-    referer_regex = re.compile(r'\?[\da-f]*')
     related_tags = {}
     page = scrapeler_args['page']
     url_tags = scrapeler_args['url_tags']
@@ -165,7 +163,7 @@ def scrape_booru(scrapeler_args):
         next_sleep = _rand.randint(3600, 10800)  # 1 to 3 hours til sleeping.
         print('Will sleep in {0} seconds'.format(next_sleep))
     keep_scraping = True
-    
+
     while keep_scraping:
         timestamp = datetime.datetime.now()
         delay = scrapeler_args['base_delay'] + _rand.uniform(2,4)
@@ -176,7 +174,7 @@ def scrape_booru(scrapeler_args):
         results = scrape_soup.findAll('img', class_='preview')
         if len(results) < 42:
             keep_scraping = False
-        
+
         for result in results:
             if scrapeler_args['kwcount'] != 0:
                 for tag in result.attrs['title'].split():
@@ -185,24 +183,21 @@ def scrape_booru(scrapeler_args):
                     else:
                         related_tags[tag] = 1
 
-            img_fn = id_regex.search(result.attrs['src']).group(1)
-            refer_id = referer_regex.search(result.attrs['src']).group(0)
-            current = grab_url_base.format(img_fn[:2], img_fn[2:4], img_fn)
-            # Check if image is already saved before scraping it?
-            image_file_path = "{directory}\\{fn}".format(directory=scrapeler_args['scrape_save_directory'],
-                                                         fn=img_fn)
-
-            if not os.path.exists(image_file_path) and not scrapeler_args['scanonly']:
+            if not scrapeler_args['scanonly']:
+                img_fn = id_regex.search(result.attrs['src']).group(1)
+                refer_id = referer_regex.search(result.attrs['src']).group(0)[1:]
+                image_file_path = "{directory}\\{fn}".format(directory=scrapeler_args['scrape_save_directory'],
+                                                             fn=img_fn)
                 delay = scrapeler_args['base_delay'] + _rand.uniform(0,2)
                 time.sleep(delay)
-                save_image(image_file_path, current, referer_base.format(refer_id))
+                route_through_subpage(scrape_url, referer_base.format(refer_id), image_file_path)
 
-            # todo if you scrape and find this tag: <title>Gelbooru - Intermission Ad</title>
-            # wait 15 seconds then try the page again
+                # todo if you scrape and find this tag: <title>Gelbooru - Intermission Ad</title>
+                # wait 15 seconds then try the page again
         if 0 < scrapeler_args['pagelimit'] < scrapeler_args['page'] - page:
             keep_scraping = False
 
-        page+= 1
+        page += 1
         if keep_scraping and scrapeler_args['sleep']:
             rn = datetime.datetime.now()
             if rn - timestamp > datetime.timedelta(seconds=next_sleep):
@@ -215,8 +210,8 @@ def scrape_booru(scrapeler_args):
                 print('Will sleep in {0} seconds'.format(next_sleep))
 
     return related_tags
-    
-    
+
+
 def main():
     scrapeler_args = parse_scrapeler_args()
     print('\nArguments parsed as:')
@@ -226,7 +221,7 @@ def main():
     print('Start on page:', scrapeler_args['page'])
     if scrapeler_args['scanonly']:
         print('Scan only')
-   
+
     related_tags = scrape_booru(scrapeler_args)
     sorted_related_tags = sorted(related_tags, key=related_tags.get, reverse=True)
     if scrapeler_args['kwcount'] == -1:
@@ -235,13 +230,13 @@ def main():
         kwcount = scrapeler_args['kwcount']
     if scrapeler_args['kwfile']:
         with codecs.open(scrapeler_args['scrape_save_directory'] + '\\keywords.txt', 'w', encoding="utf8") as kwf:
-                kwf.write('You scraped for:\r\n')
-                for tag in scrapeler_args['tags']:
-                    kwf.write('{tag} \r\n'.format(tag=tag))
-                if kwcount > 0:
-                    kwf.write('\r\nWhich found the following keyword list:\r\n')
-                    for tag in sorted_related_tags[:kwcount]:
-                        kwf.write('{tag} : {count}\r\n'.format(tag=tag, count=related_tags[tag]))
+            kwf.write('You scraped for:\r\n')
+            for tag in scrapeler_args['tags']:
+                kwf.write('{tag} \r\n'.format(tag=tag))
+            if kwcount > 0:
+                kwf.write('\r\nWhich found the following keyword list:\r\n')
+                for tag in sorted_related_tags[:kwcount]:
+                    kwf.write('{tag} : {count}\r\n'.format(tag=tag, count=related_tags[tag]))
     else:
         for tag in sorted_related_tags[:kwcount]:
             print(tag, related_tags[tag])
