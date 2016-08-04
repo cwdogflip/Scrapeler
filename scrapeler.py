@@ -87,14 +87,14 @@ def parse_scrapeler_args(response_args=None):
     for tag in args.tags:
         temp_include.append(urllib.parse.quote(tag))
 
-    include_tags= ''.join('%s+' % x.replace('&', '%26') for x in temp_include)
+    include_tags= ''.join('%s+' % x.replace('&', '%26').replace(':','%3a') for x in temp_include)
 
     if args.exclude is not None:
         temp_exclude = []
         for tag in args.exclude:
             temp_exclude.append(urllib.parse.quote(tag))
 
-        exclude_tags = ''.join('-%s+' % urllib.parse.quote(x) for x in temp_exclude)
+        exclude_tags = ''.join('-%s+' % x.replace('&', '%26').replace(':','%3a') for x in temp_exclude)
     else:
         exclude_tags = ''
 
@@ -200,6 +200,8 @@ def scrape_booru(scrapeler_args):
         if len(results) < 42:
             keep_scraping = False
 
+        print('{0} results on page\n.'.format(len(results)))
+
         for result in results:
             if scrapeler_args['kwcount'] != 0:
                 for tag in result.attrs['title'].split():
@@ -257,6 +259,9 @@ def perform(scrapeler_args):
         with codecs.open(scrapeler_args['scrape_save_directory'] + '\\keywords.txt', 'w', encoding="utf8") as kwf:
             kwf.write('You scraped for:\r\n')
             for tag in scrapeler_args['tags']:
+                kwf.write('{tag} \r\n'.format(tag=tag))
+            kwf.write('You excluded:\r\n')
+            for tag in scrapeler_args['exclude']:
                 kwf.write('{tag} \r\n'.format(tag=tag))
             if kwcount > 0:
                 kwf.write('\r\nWhich found the following keyword list:\r\n')
