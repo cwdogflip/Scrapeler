@@ -142,7 +142,7 @@ def route_through_subpage(directory_page, referer_id, image_file_path):
                 search_text = response.text[start:start+end]
                 result = search_text[search_text.find(split_url[1]):]
                 result = result[:result.find('"')]
-                current_img = split_url[0] +'.'+ result
+                current_img = split_url[0] + '.' + result
 
             # this logic is fucked by I don't care
             extension = current_img.split('?')[0][-5:].split('.')[1]
@@ -200,12 +200,12 @@ def scrape_booru(scrapeler_args):
         if len(results) < 42:
             keep_scraping = False
 
-        print('{0} results on page\n.'.format(len(results)))
+        print('{0} results on page\n'.format(len(results)))
 
         for result in results:
             if scrapeler_args['kwcount'] != 0:
                 for tag in result.attrs['title'].split():
-                    if tag in related_tags:
+                    if tag in related_tags and 'score' not in tag:
                         related_tags[tag] += 1
                     else:
                         related_tags[tag] = 1
@@ -260,7 +260,7 @@ def perform(scrapeler_args):
             kwf.write('You scraped for:\r\n')
             for tag in scrapeler_args['tags']:
                 kwf.write('{tag} \r\n'.format(tag=tag))
-            kwf.write('You excluded:\r\n')
+            kwf.write('\r\nYou excluded:\r\n')
             for tag in scrapeler_args['exclude']:
                 kwf.write('{tag} \r\n'.format(tag=tag))
             if kwcount > 0:
