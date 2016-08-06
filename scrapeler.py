@@ -190,7 +190,7 @@ def scrape_booru(scrapeler_args):
 
     related_tags = {}
     found = 0
-    saved_imgs = 0
+    total_saved_imgs = 0
     page = scrapeler_args['page']
     url_tags = scrapeler_args['url_tags']
     if scrapeler_args['sleep']:
@@ -204,6 +204,7 @@ def scrape_booru(scrapeler_args):
 
     timestamp = datetime.datetime.now()
     while keep_scraping:
+        saved_imgs = 0
         delay = scrapeler_args['base_delay'] + _rand.uniform(2,4)
         time.sleep(delay)
         scrape_url = main_url_base.format(url_tags=url_tags ,pid=str(42* (page-1)))
@@ -214,7 +215,7 @@ def scrape_booru(scrapeler_args):
         if len(results) < 42:
             keep_scraping = False
 
-        print('{0} results on page ({1} found, {2} saved.)\n'.format(len(results), found, saved_imgs))
+        print('{0} results on page ({1} found, {2} saved.)\n'.format(len(results), found, total_saved_imgs))
 
         for result in results:
             if scrapeler_args['kwcount'] != 0:
@@ -235,6 +236,8 @@ def scrape_booru(scrapeler_args):
 
                 # todo if you scrape and find this tag: <title>Gelbooru - Intermission Ad</title>
                 # wait 15 seconds then try the page again
+        total_saved_imgs += saved_imgs
+
         page += 1
         if -1 < final_page == page:
             keep_scraping = False
