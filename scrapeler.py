@@ -154,7 +154,14 @@ def route_through_subpage(directory_page, referer_id, image_file_path):
         except AttributeError as ae:
             img_tag = soup.find('source')
             current_img = img_tag.attrs['src']
-            print('Scrapeler Error: Could not save {0} webm files are not supported (yet)'.format(current_img))
+            image_file_path = image_file_path[:-3] + 'webm'
+            if not os.path.exists(image_file_path):
+                delay = 4 + _rand.uniform(3, 4)
+                time.sleep(delay)
+                ret = save_image(referer_id, current_img, image_file_path)
+            else:
+                print('{0} skipped: Already saved.'.format(current_img))
+
         except Exception as e:
             print(e)
     return ret
@@ -162,21 +169,21 @@ def route_through_subpage(directory_page, referer_id, image_file_path):
 
 def save_image(referer_id, current_img, save_to):
     with requests.Session() as sess:
-        response = sess.get(current_img, data=None, headers={
+        response = sess.get(current_img, data=None, stream=True, headers={
             'User-Agent': UserAgent().firefox,
             'Referer': referer_id,
         })
-        if not response.status_code == 404:
-            b = BytesIO(response.content)
-            try:
-                image = Image.open(b)
-                image.save(save_to)
-                image.close()
-                print(current_img)
-                return 1
-            except Exception as e:
-                print(e)
-                return 0
+        try:
+            if response.status_code == 200:
+                with open(save_to, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=1024):
+                        if chunk:  # filter out keep-alive new chunks
+                            f.write(chunk)
+                    print(current_img)
+                    return 1
+        except Exception as e:
+            print(e)
+            return 0
 
 
 def scrape_booru(scrapeler_args):
