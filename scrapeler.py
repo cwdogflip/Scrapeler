@@ -19,10 +19,6 @@ from PIL import Image
 main_url_base = r'http://gelbooru.com/index.php?page=post&s=list&tags={url_tags}&pid={pid}'
 grab_url_base = r'http://gelbooru.com//images/{0}/{1}/{2}'
 referer_base = r'http://gelbooru.com/index.php?page=post&s=view&id={0}'
-
-import requests
-
-
 id_regex = re.compile(r'(?<=thumbnail_)([\da-f]*\.jpg|\.png|\.gif)')
 sample_retrieve_regex = re.compile(r'(?<=.com//)(images/[\da-f]{2}/[\da-f]{2}\.jpg|\.png|\.gif)')
 referer_regex = re.compile(r'\?[\da-f]*')
@@ -43,10 +39,11 @@ def get_soup(url):
             return None
 
 
-def parse_scrapeler_args(response_args=None):
+def parse_scrapeler_args(batch_args=None):
     scrapeler_args = {}
 
-    parser = argparse.ArgumentParser(description='Scrape a booru-style image database. At least one tag is required to scrape. It\'s recommended you give one specific tag to avoid flooding yourself with images you don\' want. Scrapeler will not scrape more than 100 pages at once.')
+    parser = argparse.ArgumentParser(description='Scrape a booru-style image database. '
+                                                 'At least one tag is required to scrape. Choose carefully!')
     parser.add_argument("tags", type=str,
                         help="Enter the tags you want to scrape.\nAt least 1 tag argument is required.",
                         nargs='+',)
@@ -62,15 +59,14 @@ def parse_scrapeler_args(response_args=None):
     parser.add_argument("--sleep", default=False, action='store_true', help='If on, Scrapeler will sleep randomly trying to disguise itself.')
     parser.add_argument("--randompagelimit", default=False, action='store_true', help='If on, Scrapeler will stop when it finds no more images or randomly between 10 and 30 pages.')
     parser.add_argument("--scanonly", default=False, action='store_true', help='If on, images will not be saved, but you still collect keyword data.')
-    parser.add_argument("--patient", default=False, action='store_true', help='If on, the minimum delay between url requests will be increased by 3 seconds. Better if you have a slow connection')
-    parser.add_argument("--aggressive", default=False, action='store_true', help='If on, the minimum delay between url requests will be reduced by 2 seconds. Don\'t get banned!')
-    parser.add_argument("--response", default=None, type=argparse.FileType('r'))
+    parser.add_argument("--shortcircuit", default=False, action='store_true', help='If on, Scrapeler will stop scraping if it finds nothing on a page that you haven\'t already saved. Does nothing if --scanonly is on.')
+    parser.add_argument("--batch", default=None, type=argparse.FileType('r'))
 
-    if not response_args:
+    if not batch_args:
         args = parser.parse_args()
     else:
-        args = parser.parse_args(response_args.split())
-        assert args.response is None
+        args = parser.parse_args(batch_args.split())
+        assert args.batch is None
 
     if args.dir is not None:
         directory = args.dir
@@ -98,12 +94,10 @@ def parse_scrapeler_args(response_args=None):
     else:
         exclude_tags = ''
 
-    base_delay = 3
-    if args.patient: base_delay += 3
-    if args.aggressive: base_delay -= 2
+    base_delay = 4
 
     scrapeler_args['tags'] = args.tags
-    scrapeler_args['exclude'] = args.exclude
+    scrapeler_args['exclude'] = args.exclude if args.exclude is not None else []
     scrapeler_args['url_tags'] = (include_tags + exclude_tags)[:-1]
     scrapeler_args['scrape_save_directory'] = save_path
     scrapeler_args['page'] = args.page
@@ -112,7 +106,8 @@ def parse_scrapeler_args(response_args=None):
     scrapeler_args['scanonly'] = args.scanonly
     scrapeler_args['base_delay'] = base_delay
     scrapeler_args['sleep'] = args.sleep
-    scrapeler_args['response'] = args.response
+    scrapeler_args['short'] = args.shortcircuit
+    scrapeler_args['batch'] = args.batch
 
     if args.randompagelimit:
         scrapeler_args['pagelimit'] = _rand.randint(10,30)
@@ -123,6 +118,7 @@ def parse_scrapeler_args(response_args=None):
 
 
 def route_through_subpage(directory_page, referer_id, image_file_path):
+    ret = 0
     with requests.Session() as sess:
         response = sess.get(referer_id, data=None, headers={
             'User-Agent': UserAgent().firefox,
@@ -152,9 +148,16 @@ def route_through_subpage(directory_page, referer_id, image_file_path):
             if not os.path.exists(image_file_path):
                 delay = 4 + _rand.uniform(3, 4)
                 time.sleep(delay)
-                save_image(referer_id, current_img, image_file_path)
+                ret = save_image(referer_id, current_img, image_file_path)
+            else:
+                print('{0} skipped: Already saved.'.format(current_img))
+        except AttributeError as ae:
+            img_tag = soup.find('source')
+            current_img = img_tag.attrs['src']
+            print('Scrapeler Error: Could not save {0} webm files are not supported (yet)'.format(current_img))
         except Exception as e:
             print(e)
+    return ret
 
 
 def save_image(referer_id, current_img, save_to):
@@ -170,18 +173,21 @@ def save_image(referer_id, current_img, save_to):
                 image.save(save_to)
                 image.close()
                 print(current_img)
+                return 1
             except Exception as e:
                 print(e)
-                pass
+                return 0
 
 
 def scrape_booru(scrapeler_args):
 
     related_tags = {}
+    found = 0
+    saved_imgs = 0
     page = scrapeler_args['page']
     url_tags = scrapeler_args['url_tags']
     if scrapeler_args['sleep']:
-        next_sleep = _rand.randint(3600, 10800)  # 1 to 3 hours til sleeping.
+        next_sleep = _rand.randint(7200, 10800)  # 2 to 3 hours til sleeping.
         print('Will sleep in {0} seconds'.format(next_sleep))
     keep_scraping = True
     if scrapeler_args['pagelimit']:
@@ -195,12 +201,13 @@ def scrape_booru(scrapeler_args):
         time.sleep(delay)
         scrape_url = main_url_base.format(url_tags=url_tags ,pid=str(42* (page-1)))
         scrape_soup = get_soup(scrape_url)
-        print('Scraping: {0}, (page {1})'.format(scrape_url, page))
+        print('\nScraping: {0}, (page {1})'.format(scrape_url, page))
         results = scrape_soup.findAll('img', class_='preview')
+        found += len(results)
         if len(results) < 42:
             keep_scraping = False
 
-        print('{0} results on page\n'.format(len(results)))
+        print('{0} results on page ({1} found, {2} saved.)\n'.format(len(results), found, saved_imgs))
 
         for result in results:
             if scrapeler_args['kwcount'] != 0:
@@ -217,7 +224,7 @@ def scrape_booru(scrapeler_args):
                                                              fn=img_fn)
                 delay = scrapeler_args['base_delay'] + _rand.uniform(0,2)
                 time.sleep(delay)
-                route_through_subpage(scrape_url, referer_base.format(refer_id), image_file_path)
+                saved_imgs += route_through_subpage(scrape_url, referer_base.format(refer_id), image_file_path)
 
                 # todo if you scrape and find this tag: <title>Gelbooru - Intermission Ad</title>
                 # wait 15 seconds then try the page again
@@ -225,15 +232,19 @@ def scrape_booru(scrapeler_args):
         if -1 < final_page == page:
             keep_scraping = False
 
+        if scrapeler_args['short'] and not scrapeler_args['scanonly'] and saved_imgs == 0:
+            keep_scraping = False
+
         if keep_scraping and scrapeler_args['sleep']:
             rn = datetime.datetime.now()
             if rn - timestamp > datetime.timedelta(seconds=next_sleep):
-                long_delay = _rand.randint(7200, 14400) + _rand.uniform(0,1)  #2 to 4 hours of sleeping.
+                print('Scrapeler entered sleep. ({0})'.format(datetime.datetime.now()))
+                long_delay = _rand.randint(1800, 3600) + _rand.uniform(0,1)  # .5 to 1 hours of sleeping
                 while datetime.datetime.now() < rn + datetime.timedelta(seconds=long_delay):
                     time.sleep(120)
-                    print('Sleeping...')
                 timestamp = datetime.datetime.now()
-                next_sleep = _rand.randint(3600, 10800)  # 1 to 3 hours til sleeping.
+                print('Scrapeler started scraping again. ({0})'.format(timestamp))
+                next_sleep = _rand.randint(7200, 10800)  # 2 to 3 hours til sleeping.
                 print('Will sleep in {0} seconds'.format(next_sleep))
 
     return related_tags
@@ -276,13 +287,16 @@ def main():
     scrapeler_args = parse_scrapeler_args()
 
     perform(scrapeler_args)
-    if scrapeler_args['response']:
-        responsefile = scrapeler_args['response']
-        for line in responsefile:
+    if scrapeler_args['batch']:
+        batch_file = scrapeler_args['batch']
+        for command in batch_file:
             try:
-                perform(parse_scrapeler_args(line))
+                perform(parse_scrapeler_args(command))
+                delay = _rand.uniform(900, 1200)
+                print('Sleeping for {} seconds'.format(delay))
+                time.sleep(delay)
             except AssertionError as ae:
-                print('response files may not contain calls to other response files.')
+                print('Batch files may not contain calls to other batch files. Command {0} skipped.'.format(command))
             except Exception as e:
                 print(e)
 
