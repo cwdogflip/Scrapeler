@@ -208,11 +208,12 @@ def scrape_booru(scrapeler_args):
             save_current = True
             filter_reasons = []
             for tag in result.attrs['title'].split():
-                if tag in related_tags and 'score' not in tag:
+                if tag in related_tags:
                     related_tags[tag] += 1
-                else:
+                elif 'score' not in tag:
                     related_tags[tag] = 1
                 if tag in scrapeler_args['filter']:
+                    scrapeler_args['filter'][tag] += 1
                     save_current = False
                     filter_reasons.append(tag)
 
@@ -233,7 +234,8 @@ def scrape_booru(scrapeler_args):
 
         if not scrapeler_args['scanonly']:
             total_saved_imgs += saved_imgs
-            print('{0} images saved for page {1}. ({2} images saved in total.)'.format(saved_imgs, page, total_saved_imgs))
+            print('{0} images saved for page {1}. ({2} images saved in total.)'.format(saved_imgs, page,
+                                                                                       total_saved_imgs))
 
         page += 1
         if -1 < final_page == page:
@@ -264,18 +266,25 @@ def perform_gelbooru_scrape(scrapeler_args):
     else:
         kwcount = scrapeler_args['kwcount']
 
+    sorted_filters = sorted(scrapeler_args['filter'], key=scrapeler_args['filter'].get, reverse=True)
+
     if scrapeler_args['kwcount'] != 0:
         with codecs.open(scrapeler_args['scrape_save_directory'] + '\\keywords.txt', 'w', encoding="utf8") as kwf:
             kwf.write('You scraped for:\r\n')
             for tag in scrapeler_args['tags']:
                 kwf.write('{tag} \r\n'.format(tag=tag))
-            kwf.write('\r\nYou excluded:\r\n')
-            for tag in scrapeler_args['exclude']:
-                kwf.write('{tag} \r\n'.format(tag=tag))
-            if kwcount > 0:
-                kwf.write('\r\nWhich found the following keyword list:\r\n')
-                for tag in sorted_related_tags[:kwcount]:
-                    kwf.write('{tag} : {count}\r\n'.format(tag=tag, count=related_tags[tag]))
+            if scrapeler_args['exclude']:
+                kwf.write('\r\nYou excluded:\r\n')
+                for tag in scrapeler_args['exclude']:
+                    kwf.write('{tag} \r\n'.format(tag=tag))
+            if scrapeler_args['filter']:
+                kwf.write('\r\nYour filters prevented:\r\n')
+                for tag in sorted_filters:
+                    if scrapeler_args['filter'][tag] > 0:
+                        kwf.write('{tag} : {count}\r\n'.format(tag=tag, count=scrapeler_args['filter'][tag]))
+            kwf.write('\r\nWhich found the following keyword list:\r\n')
+            for tag in sorted_related_tags[:kwcount]:
+                kwf.write('{tag} : {count}\r\n'.format(tag=tag, count=related_tags[tag]))
 
 
 def main():
