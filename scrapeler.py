@@ -295,14 +295,13 @@ def main():
         batch_file = scrapeler_args['batch']
         for command in batch_file:
             try:
-                perform_gelbooru_scrape(parse_scrapeler_args(command))
                 delay = random.uniform(300, 450)
                 print('Sleeping for {0} seconds between commands.'.format(delay))
                 time.sleep(delay)
-            except AssertionError as ae:
-                print('Batch files may not contain calls to other batch files. Command {0} skipped.'.format(command))
+                perform_gelbooru_scrape(parse_scrapeler_args(command))
             except Exception as ex:
                 print('Unhandled exception {e} occured during command {c}'.format(e=ex, c=command))
+        print('Finished.')
 
 if __name__ == '__main__':
     main()
