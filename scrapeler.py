@@ -13,6 +13,7 @@ import sys
 
 from bs4 import BeautifulSoup
 from fake_useragent import UserAgent
+from functools import wraps
 
 main_url_base = r'http://gelbooru.com/index.php?page=post&s=list&tags={url_tags}&pid={pid}'
 grab_url_base = r'http://gelbooru.com//images/{0}/{1}/{2}'
@@ -22,19 +23,28 @@ sample_retrieve_regex = re.compile(r'(?<=.com//)(images/[\da-f]{2}/[\da-f]{2}\.j
 referer_regex = re.compile(r'\?[\da-f]*')
 
 
-def get_soup(url):
-    with requests.Session() as sess:
-        response = sess.get(url, data=None, headers={
-            'User-Agent': UserAgent().random,
-            'Accept': '''text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8''',
-            'Connection': 'keep-alive',
-        }
-                            )
-        if response.status_code == 200:
-            return BeautifulSoup(response.text, "html5lib")
-        else:
-            print(response.status_code)
-            return None
+def retry(caught_exceptions=(ConnectionRefusedError, requests.ConnectionError),
+          max_tries=4, base_delay=256, back_off=2):
+
+    def deco_retry(f):
+        @wraps(f)
+        def f_retry(*args, **kwargs):
+            tries_left = max_tries
+            current_delay = base_delay + random.randint(0, base_delay) + random.uniform(0, 1)
+            while tries_left > 1:
+                try:
+                    return f(*args, **kwargs)
+                except caught_exceptions as e:
+                    msg = "Caught {e}. Retrying in {sec}".format(e=e, sec=current_delay)
+                    print(msg)
+                    time.sleep(current_delay)
+                    tries_left -= 1
+                    current_delay *= back_off
+            # Try last time without a catch.
+            return f(*args, **kwargs)
+
+        return f_retry
+    return deco_retry
 
 
 def parse_scrapeler_args(batch_args=None):
@@ -104,6 +114,23 @@ def parse_scrapeler_args(batch_args=None):
     return scrapeler_args
 
 
+@retry()
+def get_soup(url):
+    with requests.Session() as sess:
+        response = sess.get(url, data=None, headers={
+            'User-Agent': UserAgent().random,
+            'Accept': '''text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8''',
+            'Connection': 'keep-alive',
+        }
+                            )
+        if response.status_code == 200:
+            return BeautifulSoup(response.text, "html5lib")
+        else:
+            print(response.status_code)
+            return None
+
+
+@retry()
 def route_through_subpage(directory_page, referer_id, image_file_path):
     ret = 0
     with requests.Session() as sess:
@@ -156,6 +183,7 @@ def route_through_subpage(directory_page, referer_id, image_file_path):
     return ret
 
 
+@retry()
 def save_image(referer_id, current_img, save_to):
     with requests.Session() as sess:
         response = sess.get(current_img, data=None, stream=True,
