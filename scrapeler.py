@@ -41,6 +41,8 @@ def parse_scrapeler_args(batch_args=None):
     # sys.argv[0] is always 'scrapeler.py'
     raw_args = batch_args.split() if batch_args is not None else sys.argv[1:]
 
+    expanded_args = expand_response_files(raw_args).split();
+
     parser = argparse.ArgumentParser(description='Scrape a booru-style image database. '
                                                  'At least one tag is required to scrape. Choose carefully!')
     parser.add_argument("tags", type=str,
@@ -59,7 +61,7 @@ def parse_scrapeler_args(batch_args=None):
     parser.add_argument("--shortcircuit", default=False, action='store_true', help='If on, Scrapeler will stop scraping if it finds nothing on a page that you haven\'t already saved. Does nothing if --scanonly is on.')
     parser.add_argument("--batch", default=None, type=argparse.FileType('r'), help="Pass a file that contains additional Scrapeler queries here.")
 
-    parsed_args = parser.parse_args(raw_args)
+    parsed_args = parser.parse_args(expanded_args)
 
     if parsed_args.dir is not None:
         directory = parsed_args.dir
@@ -102,6 +104,19 @@ def parse_scrapeler_args(batch_args=None):
     }
 
     return scrapeler_args
+
+def expand_response_files(raw_args):
+    expanded_args = ""
+    for arg in raw_args:
+        if arg.startswith('@'):
+            response_file = open(arg[1:], 'r')
+            arg_to_add = response_file.readline()
+        else:
+            arg_to_add = arg
+
+        expanded_args = expanded_args.strip() + " " + arg_to_add
+
+    return expanded_args
 
 
 def route_through_subpage(directory_page, referer_id, image_file_path):
