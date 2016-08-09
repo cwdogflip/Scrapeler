@@ -41,7 +41,7 @@ def parse_scrapeler_args(batch_args=None):
     # sys.argv[0] is always 'scrapeler.py'
     raw_args = batch_args.split() if batch_args is not None else sys.argv[1:]
 
-    expanded_args = expand_response_files(raw_args).split();
+    expanded_args = expand_response_files(raw_args)
 
     parser = argparse.ArgumentParser(description='Scrape a booru-style image database. '
                                                  'At least one tag is required to scrape. Choose carefully!')
@@ -106,7 +106,7 @@ def parse_scrapeler_args(batch_args=None):
     return scrapeler_args
 
 def expand_response_files(raw_args):
-    expanded_args = ""
+    expanded_args = []
     for arg in raw_args:
         if arg.startswith('@'):
             response_file = open(arg[1:], 'r')
@@ -114,10 +114,8 @@ def expand_response_files(raw_args):
         else:
             arg_to_add = arg
 
-        expanded_args = expanded_args.strip() + " " + arg_to_add
 
     return expanded_args
-
 
 def route_through_subpage(directory_page, referer_id, image_file_path):
     ret = 0
