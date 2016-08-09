@@ -114,6 +114,7 @@ def expand_response_files(raw_args):
         else:
             arg_to_add = arg
 
+        expanded_args.extend(arg_to_add.split())
 
     return expanded_args
 
