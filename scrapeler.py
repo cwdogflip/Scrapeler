@@ -23,7 +23,7 @@ sample_retrieve_regex = re.compile(r'(?<=.com//)(images/[\da-f]{2}/[\da-f]{2}\.j
 referer_regex = re.compile(r'\?[\da-f]*')
 
 
-def retry(caught_exceptions=(ConnectionRefusedError, requests.ConnectionError),
+def retry(caught_exceptions=(ConnectionRefusedError, requests.ConnectionError, requests.HTTPError),
           max_tries=4, base_delay=256, back_off=2):
 
     def deco_retry(f):
@@ -45,6 +45,7 @@ def retry(caught_exceptions=(ConnectionRefusedError, requests.ConnectionError),
 
         return f_retry
     return deco_retry
+
 
 # Shoutout to Dogflip for writing this
 def expand_response_files(raw_args):
@@ -140,73 +141,71 @@ def get_soup(url):
                             )
         if response.status_code == 200:
             return BeautifulSoup(response.text, "html5lib")
-        else:
-            print(response.status_code)
-            return None
+        elif response.status_code >= 500:
+            response.raise_for_status()
 
 
 @retry()
-def route_through_subpage(directory_page, referer_id, image_file_path):
+def route_through_subpage(directory_page, subpage_id, image_file_path):
     ret = 0
     with requests.Session() as sess:
-        response = sess.get(referer_id, data=None, headers={
+        response = sess.get(subpage_id, data=None, headers={
             'User-Agent': UserAgent().firefox,
             'Referer': directory_page,
         })
+
+    if response.status_code >= 500:
+        response.raise_for_status()
 
     if not response.status_code == 404:
         soup = BeautifulSoup(response.content, "html5lib", from_encoding=response.encoding)
         try:
             img_tag = soup.find('img', id='image')
-            current_img = img_tag.attrs['src']
+            if img_tag is not None:
+                current_img = img_tag.attrs['src']
+                if 'sample' in current_img:
+                    original_url = current_img.replace('samples', 'images').replace('sample_', '')
+                    split_url = original_url.split('.')
+                    start = response.text.find('<h5>Options</h5>')
+                    end = response.text[start:].find('>Original')
+                    search_text = response.text[start:start + end]
+                    result = search_text[search_text.find(split_url[1]):]
+                    result = result[:result.find('"')]
+                    current_img = split_url[0] + '.' + result
 
-            if 'sample' in current_img:
-                original_url = current_img.replace('samples', 'images').replace('sample_', '')
-                split_url = original_url.split('.')
-                start = response.text.find('<h5>Options</h5>')
-                end = response.text[start:].find('>Original')
-                search_text = response.text[start:start+end]
-                result = search_text[search_text.find(split_url[1]):]
-                result = result[:result.find('"')]
-                current_img = split_url[0] + '.' + result
-
-            # this logic is fucked but I don't care
-            extension = current_img.split('?')[0][-5:].split('.')[1]
-            # image file path always starts life as a .jpg
-            image_file_path = image_file_path[:-3] + extension
-
-            if not os.path.exists(image_file_path):
-                delay = 4 + random.uniform(2, 4)
-                time.sleep(delay)
-                ret = save_image(referer_id, current_img, image_file_path)
+                # this logic is fucked but I don't care
+                extension = current_img.split('?')[0][-5:].split('.')[1]
+                # image file path always starts life as a .jpg
+                image_file_path = image_file_path[:-3] + extension
             else:
-                print('{0} skipped: Already saved.'.format(current_img))
-        except AttributeError as ae:
-            # TODO Refactor this to be less redundant.
-            img_tag = soup.find('source')
-            current_img = img_tag.attrs['src']
-            image_file_path = image_file_path[:-3] + 'webm'
+                img_tag = soup.find('source')
+                current_img = img_tag.attrs['src']
+                image_file_path = image_file_path[:-3] + 'webm'
+
             if not os.path.exists(image_file_path):
                 delay = 4 + random.uniform(3, 4)
                 time.sleep(delay)
-                ret = save_image(referer_id, current_img, image_file_path)
+                ret = save_image(subpage_id, current_img, image_file_path)
             else:
                 print('{0} skipped: Already saved.'.format(current_img))
-
         except Exception as e:
             print('Unhandled exception: {}'.format(e))
     return ret
 
 
 @retry()
-def save_image(referer_id, current_img, save_to):
+def save_image(referencing_page, current_img, save_to):
     with requests.Session() as sess:
         response = sess.get(current_img, data=None, stream=True,
                             headers={
                                 'User-Agent': UserAgent().firefox,
-                                'Referer': referer_id,
+                                'Referer': referencing_page,
                             }
         )
+
+        if response.status_code >= 500:
+            response.raise_for_status()
+
         try:
             if response.status_code == 200:
                 with open(save_to, 'wb') as f:
