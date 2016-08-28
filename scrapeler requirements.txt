@@ -1,0 +1,7 @@
+beautifulsoup4==4.5.0
+bs4==0.0.1
+fake-useragent==0.1.0
+html5lib==0.999999999
+requests==2.10.0
+six==1.10.0
+webencodings==0.5
