@@ -10,6 +10,7 @@ import urllib
 import requests
 import codecs
 import sys
+import signal
 
 from bs4 import BeautifulSoup
 from fake_useragent import UserAgent
@@ -53,7 +54,7 @@ def expand_response_files(raw_args):
     for arg in raw_args:
         if arg.startswith('@'):
             response_file = open(arg[1:], 'r')
-            arg_to_add = response_file.readline()
+            arg_to_add = response_file.read()
         else:
             arg_to_add = arg
 
@@ -61,6 +62,42 @@ def expand_response_files(raw_args):
 
     return expanded_args
 
+
+class InterruptManager(object):
+    def __enter__(self):
+        self.signal_received = False
+        self.old_handler = signal.getsignal(signal.SIGINT)
+        signal.signal(signal.SIGINT, self.handler)
+
+    def handler(self, sig, frame):
+        self.signal_received = (sig, frame)
+        print('Received interrupt signal. Scrapeler will stop shortly.')
+
+    def __exit__(self, type, value, traceback):
+        signal.signal(signal.SIGINT, self.old_handler)
+        if self.signal_received:
+            try:
+                self.old_handler(*self.signal_received)
+            except KeyboardInterrupt:
+                exit('Scrapeler was interrupted and has stopped.')
+
+
+def generate_blacklist(blacklists):
+    temp_list = []
+    for b in blacklists:
+        path = os.path.abspath(b)
+        if os.path.exists(path):
+            if os.path.isfile(path):
+                with open(path, 'r') as file:
+                    contents = file.read()
+                    temp_list.extend(contents if type(contents) == list else [contents])
+            elif os.path.isdir(path):
+                files = os.listdir(path)
+                temp_list.extend(files)
+            else:
+                raise OSError("Whatever you did, don't do that.")
+
+    return {x.split('.')[0]: 1 for x in temp_list}
 
 def parse_scrapeler_args(batch_args=None):
     # sys.argv[0] is always 'scrapeler.py'
@@ -84,6 +121,7 @@ def parse_scrapeler_args(batch_args=None):
     parser.add_argument("--scanonly", default=False, action='store_true', help='If on, images will not be saved, but you still collect keyword data.')
     parser.add_argument("--shortcircuit", default=False, action='store_true', help='If on, Scrapeler will stop scraping if it finds nothing on a page that you haven\'t already saved. Does nothing if --scanonly is on.')
     parser.add_argument("--batch", default=None, type=argparse.FileType('r'), help="Pass a file that contains additional Scrapeler queries here.")
+    parser.add_argument("--blacklist", default=None, type=str, nargs='+', help='Beta!')
 
     parsed_args = parser.parse_args(expanded_args)
 
@@ -91,6 +129,9 @@ def parse_scrapeler_args(batch_args=None):
         directory = parsed_args.dir
     else:
         directory = datetime.datetime.now().strftime('{0} %Y%m%d_%H%M').format(parsed_args.tags[0])
+
+    if parsed_args.blacklist is not None:
+        blacklist = generate_blacklist(parsed_args.blacklist)
 
     save_path = os.path.abspath(directory)
     if not os.path.exists(save_path):
@@ -125,6 +166,7 @@ def parse_scrapeler_args(batch_args=None):
         'base_delay': 4,
         'short': parsed_args.shortcircuit,
         'batch': parsed_args.batch,
+        'blacklist': blacklist if parsed_args.blacklist is not None else [],
     }
 
     return scrapeler_args
@@ -247,32 +289,34 @@ def scrape_booru(scrapeler_args):
         print('{0} results on page\n'.format(len(results)))
 
         for result in results:
-            save_current = True
-            filter_reasons = []
-            for tag in result.attrs['title'].split():
-                if tag in related_tags:
-                    related_tags[tag] += 1
-                elif 'score' not in tag:
-                    related_tags[tag] = 1
-                if tag in scrapeler_args['filter']:
-                    scrapeler_args['filter'][tag] += 1
-                    save_current = False
-                    filter_reasons.append(tag)
+            with InterruptManager():
+                save_current = True
+                filter_reasons = []
+                for tag in result.attrs['title'].split():
+                    if tag in related_tags:
+                        related_tags[tag] += 1
+                    elif 'score' not in tag:
+                        related_tags[tag] = 1
+                    if tag in scrapeler_args['filter']:
+                        scrapeler_args['filter'][tag] += 1
+                        save_current = False
+                        filter_reasons.append(tag)
 
-            if not scrapeler_args['scanonly']:
-                img_fn = id_regex.search(result.attrs['src']).group(1)
-                refer_id = referer_regex.search(result.attrs['src']).group(0)[1:]
-                if save_current:
-                    image_file_path = "{directory}\\{fn}".format(directory=scrapeler_args['scrape_save_directory'],
-                                                                 fn=img_fn)
-                    delay = scrapeler_args['base_delay'] + random.uniform(0, 2)
-                    time.sleep(delay)
-                    saved_imgs += route_through_subpage(scrape_url, referer_base.format(refer_id), image_file_path)
-                elif not save_current:
-                    print('{0} was filtered. Matched: {1}.'.format(referer_base.format(refer_id), filter_reasons[:3]))
-
-                    # todo if you scrape and find this tag: <title>Gelbooru - Intermission Ad</title>
-                    # wait 15 seconds then try the page again
+                if not scrapeler_args['scanonly']:
+                    img_fn = id_regex.search(result.attrs['src']).group(1)
+                    refer_id = referer_regex.search(result.attrs['src']).group(0)[1:]
+                    if scrapeler_args['blacklist'] and img_fn.split('.')[0] in scrapeler_args['blacklist']:
+                        print('{0} was filtered. Blacklisted: {1}'.format(referer_base.format(refer_id),
+                                                                          img_fn.split('.')[0]))
+                        continue
+                    if save_current:
+                        image_file_path = "{directory}\\{fn}".format(directory=scrapeler_args['scrape_save_directory'],
+                                                                     fn=img_fn)
+                        delay = scrapeler_args['base_delay'] + random.uniform(0, 2)
+                        time.sleep(delay)
+                        saved_imgs += route_through_subpage(scrape_url, referer_base.format(refer_id), image_file_path)
+                    elif not save_current:
+                        print('{0} was filtered. Matched: {1}.'.format(referer_base.format(refer_id), filter_reasons))
 
         if not scrapeler_args['scanonly']:
             total_saved_imgs += saved_imgs
