@@ -26,7 +26,6 @@ referer_regex = re.compile(r'\?[\da-f]*')
 
 def retry(caught_exceptions=(ConnectionRefusedError, requests.ConnectionError, requests.HTTPError),
           max_tries=4, base_delay=256, back_off=2):
-
     def deco_retry(f):
         @wraps(f)
         def f_retry(*args, **kwargs):
@@ -45,6 +44,7 @@ def retry(caught_exceptions=(ConnectionRefusedError, requests.ConnectionError, r
             return f(*args, **kwargs)
 
         return f_retry
+
     return deco_retry
 
 
@@ -99,6 +99,7 @@ def generate_blacklist(blacklists):
 
     return {x.split('.')[0]: 1 for x in temp_list}
 
+
 def parse_scrapeler_args(batch_args=None):
     # sys.argv[0] is always 'scrapeler.py'
     raw_args = batch_args.split() if batch_args is not None else sys.argv[1:]
@@ -108,20 +109,26 @@ def parse_scrapeler_args(batch_args=None):
                                                  'At least one tag is required to scrape. Choose carefully!')
     parser.add_argument("tags", type=str,
                         help="Enter the tags you want to scrape.\nAt least 1 tag argument is required.",
-                        nargs='+',)
+                        nargs='+', )
     parser.add_argument("-e", "--exclude", default=None,
-                        nargs='*', type=str, help="Tags that are explicitly avoided in urls. Helps to narrow down searches.")
+                        nargs='*', type=str,
+                        help="Tags that are explicitly avoided in urls. Helps to narrow down searches.")
     parser.add_argument("-f", "--filter", type=str, default=None,
                         nargs='*', help="If an image has a tag in this list, Scrapeler will not save it.")
-    parser.add_argument("-d", "--dir", help="The directory you want the images saved to.", nargs = '?')
+    parser.add_argument("-d", "--dir", help="The directory you want the images saved to.", nargs='?')
     parser.add_argument("-p", "--page", type=int, help="Page you want to start the scraping on", default=1, nargs='?')
     parser.add_argument("-c", "--kwcount", type=int, default=25,
                         help="The number of counted keywords reported. Defaults to 25. If this is 0, Scrapeler will not count keywords. Set this to -1 to grab all scanned keywords.")
-    parser.add_argument("--pagelimit", type=int, default=-1, help='How many pages to scan before stopping. If below 1, Scrapeler will continue until it finds a page with fewer than maximum images.')
-    parser.add_argument("--scanonly", default=False, action='store_true', help='If on, images will not be saved, but you still collect keyword data.')
-    parser.add_argument("--shortcircuit", default=False, action='store_true', help='If on, Scrapeler will stop scraping if it finds nothing on a page that you haven\'t already saved. Does nothing if --scanonly is on.')
-    parser.add_argument("--batch", default=None, type=argparse.FileType('r'), help="Pass a file that contains additional Scrapeler queries here.")
-    parser.add_argument("--blacklist", default=None, type=str, nargs='+', help='Beta!')
+    parser.add_argument("--pagelimit", type=int, default=-1,
+                        help='How many pages to scan before stopping. If below 1, Scrapeler will continue until it finds a page with fewer than maximum images.')
+    parser.add_argument("--scanonly", default=False, action='store_true',
+                        help='If on, images will not be saved, but you still collect keyword data.')
+    parser.add_argument("--shortcircuit", default=False, action='store_true',
+                        help='If on, Scrapeler will stop scraping if it finds nothing on a page that you haven\'t already saved. Does nothing if --scanonly is on.')
+    parser.add_argument("--batch", default=None, type=argparse.FileType('r'),
+                        help="Pass a file that contains additional Scrapeler queries here.")
+    parser.add_argument("--blacklist", default=None, type=str, nargs='+',
+                        help='A directory or file, or series of directories and files, that contains images you do not want Scrapeler to save. Scrapeler checks against filenames to do this.')
 
     parsed_args = parser.parse_args(expanded_args)
 
@@ -140,13 +147,13 @@ def parse_scrapeler_args(batch_args=None):
     temp_include = []
     for tag in parsed_args.tags:
         temp_include.append(urllib.parse.quote(tag))
-    include_tags= ''.join('%s+' % x.replace('&', '%26').replace(':','%3a') for x in temp_include)
+    include_tags = ''.join('%s+' % x.replace('&', '%26').replace(':', '%3a') for x in temp_include)
 
     if parsed_args.exclude is not None:
         temp_exclude = []
         for tag in parsed_args.exclude:
             temp_exclude.append(urllib.parse.quote(tag))
-        exclude_tags = ''.join('-%s+' % x.replace('&', '%26').replace(':','%3a') for x in temp_exclude)
+        exclude_tags = ''.join('-%s+' % x.replace('&', '%26').replace(':', '%3a') for x in temp_exclude)
     else:
         exclude_tags = ''
 
@@ -217,7 +224,7 @@ def route_through_subpage(directory_page, subpage_id, image_file_path):
 
                 # this logic is fucked but I don't care
                 extension = current_img.split('?')[0][-5:].split('.')[1]
-                # image file path always starts life as a .jpg
+                # image file path always starts life as a .jpg, since that's always what the thumbnails are.
                 image_file_path = image_file_path[:-3] + extension
             else:
                 img_tag = soup.find('source')
@@ -231,7 +238,7 @@ def route_through_subpage(directory_page, subpage_id, image_file_path):
             else:
                 print('{0} skipped: Already saved.'.format(current_img))
         except Exception as e:
-            print('Unhandled exception: {}'.format(e))
+            print('Unhandled exception during route_through_subpage: {}'.format(e))
     return ret
 
 
@@ -241,9 +248,7 @@ def save_image(referencing_page, current_img, save_to):
         response = sess.get(current_img, data=None, stream=True,
                             headers={
                                 'User-Agent': UserAgent().firefox,
-                                'Referer': referencing_page,
-                            }
-        )
+                                'Referer': referencing_page,})
 
         if response.status_code >= 500:
             response.raise_for_status()
@@ -257,8 +262,9 @@ def save_image(referencing_page, current_img, save_to):
                     print(current_img)
                     return 1
 
+
         except Exception as e:
-            print(e)
+            print('Unhandled exception during save_image: {}'.format(e))
             return 0
 
 
@@ -276,8 +282,8 @@ def scrape_booru(scrapeler_args):
         saved_imgs = 0
         delay = scrapeler_args['base_delay'] + random.uniform(2, 4)
         time.sleep(delay)
-        scrape_url = main_url_base.format(url_tags=url_tags, pid=str(42 * (page-1)))
-        print('\nScraping: {0}, (page {1})'.format(scrape_url, page))
+        scrape_url = main_url_base.format(url_tags=url_tags, pid=str(42 * (page - 1)))
+        print('\n[{0}] Scraping: {1}, (page {2})'.format(datetime.datetime.now(), scrape_url, page))
 
         scrape_soup = get_soup(scrape_url)
         results = scrape_soup.findAll('img', class_='preview')
@@ -320,23 +326,23 @@ def scrape_booru(scrapeler_args):
 
         if not scrapeler_args['scanonly']:
             total_saved_imgs += saved_imgs
-            print('{0} images saved for page {1}. ({2} images saved in total.)'.format(saved_imgs, page,
-                                                                                       total_saved_imgs))
+            print('[{0}] {1} images saved for page {2}. ({3} images saved in total.)'.format(datetime.datetime.now(),
+                                                                                             saved_imgs, page,
+                                                                                             total_saved_imgs))
+
+        if scrapeler_args['short'] and not scrapeler_args['scanonly'] and saved_imgs == 0:
+            print('No images saved with on page {} with shortcircuit on. Stopping.'.format(page))
+            keep_scraping = False
 
         page += 1
         if -1 < final_page == page:
             print('Page limit ({0}) was reached. Stopping.'.format(final_page))
             keep_scraping = False
 
-        if scrapeler_args['short'] and not scrapeler_args['scanonly'] and saved_imgs == 0:
-            print('No images saved with shortcircuit on. Stopping.')
-            keep_scraping = False
-
     return related_tags
 
 
 def perform_gelbooru_scrape(scrapeler_args):
-
     print('\nArguments parsed as:')
     print('Include tags:', scrapeler_args['tags'])
     print('Exclude tags:', scrapeler_args['exclude'])
@@ -375,18 +381,23 @@ def perform_gelbooru_scrape(scrapeler_args):
 
 def main():
     scrapeler_args = parse_scrapeler_args()
+    try:
+        perform_gelbooru_scrape(scrapeler_args)
+    except Exception as ex:
+        print('[{ts}] Unhandled exception {e} occured during command {c}'.format(ts=datetime.datetime.now(),
+                                                                                 e=ex, c=scrapeler_args))
 
-    perform_gelbooru_scrape(scrapeler_args)
     if scrapeler_args['batch']:
         batch_file = scrapeler_args['batch']
         for command in batch_file:
             try:
                 delay = random.uniform(300, 450)
-                print('Sleeping for {0} seconds between commands.'.format(delay))
+                print('[{0}] Sleeping for {1} seconds between commands.'.format(datetime.datetime.now(), delay))
                 time.sleep(delay)
                 perform_gelbooru_scrape(parse_scrapeler_args(command))
             except Exception as ex:
-                print('Unhandled exception {e} occured during command {c}'.format(e=ex, c=command))
+                print('[{ts}] Unhandled exception {e} occured during command {c}'.format(ts=datetime.datetime.now(),
+                                                                                         e=ex, c=command))
         print('Finished.')
 
 
