@@ -239,6 +239,7 @@ def route_through_subpage(directory_page, subpage_id, image_file_path):
                 print('{0} skipped: Already saved.'.format(current_img))
         except Exception as e:
             print('Unhandled exception during route_through_subpage: {}'.format(e))
+
     return ret
 
 
@@ -252,6 +253,10 @@ def save_image(referencing_page, current_img, save_to):
 
         if response.status_code >= 500:
             response.raise_for_status()
+
+        if response.status_code == 404:
+            print('Could not save {current}. 404: File Not found.'.format(current=current_img))
+            return 0
 
         try:
             if response.status_code == 200:
@@ -385,7 +390,7 @@ def main():
         perform_gelbooru_scrape(scrapeler_args)
     except Exception as ex:
         print('[{ts}] Unhandled exception {e} occured during command {c}'.format(ts=datetime.datetime.now(),
-                                                                                 e=ex, c=scrapeler_args))
+                                                                                 e=ex, c=scrapeler_args['tags']))
 
     if scrapeler_args['batch']:
         batch_file = scrapeler_args['batch']
