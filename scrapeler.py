@@ -97,7 +97,7 @@ def generate_blacklist(blacklists):
             else:
                 raise OSError("Whatever you did, don't do that.")
 
-    return {x.split('.')[0]: 1 for x in temp_list}
+    return {x.split('.')[0]: 0 for x in temp_list}
 
 
 def parse_scrapeler_args(batch_args=None):
@@ -158,7 +158,7 @@ def parse_scrapeler_args(batch_args=None):
         exclude_tags = ''
 
     if parsed_args.filter:
-        filtered_tags = {item: 1 for item in parsed_args.filter}
+        filtered_tags = {item: 0 for item in parsed_args.filter}
 
     scrapeler_args = {
         'tags': parsed_args.tags,
