@@ -1,4 +1,6 @@
 # -*- coding: utf-8 -*-
+from __future__ import unicode_literals
+from __future__ import print_function
 
 import argparse
 import codecs
@@ -38,7 +40,7 @@ def retry(caught_exceptions=(ConnectionRefusedError, requests.ConnectionError, r
                 try:
                     return f(*args, **kwargs)
                 except caught_exceptions as e:
-                    msg = "[{ts}] [CONNECTION] Caught {e}. Retrying in {sec}"\
+                    msg = "[{ts}] [CONNECTION] Caught {e}. Retrying in {sec}" \
                         .format(ts=datetime.datetime.now(), e=e, sec=current_delay)
                     print(msg)
                     time.sleep(current_delay)
@@ -59,6 +61,7 @@ class InterruptManager(object):
         self.old_handler = None
         self._args = args
         self._kwargs = kwargs
+        self._director = kwargs.get('director')
 
     def __enter__(self):
         self.signal_received = False
@@ -75,7 +78,8 @@ class InterruptManager(object):
             try:
                 self.old_handler(*self.signal_received)
             except KeyboardInterrupt:
-                self._kwargs['director'].quit_event.set()
+                if self._director:
+                    self._director.quit_event.set()
                 exit('Scrapeler was interrupted and has stopped.')
 
 
@@ -145,9 +149,13 @@ class ScrapelerDirector(threading.Thread):
             threading.Thread.__init__(self)
             self.__args = args
             self.saved = 0
+            self.errors = []
 
         def run(self):
-            self.saved = self.__route_through_subpage(*self.__args)
+            try:
+                self.saved = self.__route_through_subpage(*self.__args)
+            except Exception as e:
+                self.errors.append(e)
 
         @retry()
         def __route_through_subpage(self, directory_page, subpage_id, image_file_path):
@@ -350,8 +358,7 @@ def get_soup(url):
             'User-Agent': UserAgent().random,
             'Accept': '''text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8''',
             'Connection': 'keep-alive',
-        }
-                            )
+        })
         if response.status_code == 200:
             return BeautifulSoup(response.text, "html5lib")
         elif response.status_code >= 500:
@@ -418,11 +425,12 @@ def scrape_booru(scrapeler_args):
                     if save_current:
                         image_file_path = "{directory}\\{fn}".format(directory=scrapeler_args['scrape_save_directory'],
                                                                      fn=img_fn)
-                        delay = scrapeler_args['base_delay'] + random.uniform(0, 2)
-                        time.sleep(delay)
                         director.job_queue.put((scrape_url, referer_base.format(refer_id), image_file_path))
                         print('[{}] [QUEUED] {} was queued for download.'.format(datetime.datetime.now(),
                                                                                  referer_base.format(refer_id)))
+                        delay = scrapeler_args['base_delay'] + random.uniform(0, 2)
+                        time.sleep(delay)
+
                     elif not save_current:
                         print('[{}] [FILTER] {} was filtered. Matched: {}.'.format(datetime.datetime.now(),
                                                                                    referer_base.format(refer_id),
@@ -502,9 +510,9 @@ def main():
         batch_file = scrapeler_args['batch']
         for command in batch_file:
             try:
-                # delay = random.uniform(300, 450)
-                # print('[{0}] Sleeping for {1} seconds between commands.'.format(datetime.datetime.now(), delay))
-                # time.sleep(delay)
+                delay = random.uniform(300, 450)
+                print('[{0}] Sleeping for {1} seconds between commands.'.format(datetime.datetime.now(), delay))
+                time.sleep(delay)
                 perform_gelbooru_scrape(parse_scrapeler_args(command))
             except Exception as ex:
                 print('[{ts}] Unhandled exception {e} occurred during command {c}'
