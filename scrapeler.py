@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
-from __future__ import unicode_literals
 from __future__ import print_function
+from __future__ import unicode_literals
 
 import argparse
 import codecs
@@ -90,6 +90,7 @@ class ScrapelerDirector(threading.Thread):
         self.__workers = []
         self.__current_saved_count = 0
         self.__total_saved_count = 0
+        self.__worker_errors = []
 
         self.job_queue = queue.PriorityQueue()
         self.quit_event = threading.Event()
@@ -101,6 +102,8 @@ class ScrapelerDirector(threading.Thread):
                 if w.saved:
                     self.__current_saved_count += 1
                     self.__total_saved_count += 1
+                if w.errors:
+                    self.__worker_errors.append(w.errors.pop())
                 w.join()
                 self.__workers.remove(w)
 
@@ -124,6 +127,9 @@ class ScrapelerDirector(threading.Thread):
     def wait_for_workers(self):
         for w in self.__workers:
             w.join()
+
+    def report_errors(self):
+        pass  # TODO
 
     def __assign_work(self):
         # Don't let a director move on without assigning all work.
@@ -254,7 +260,7 @@ def expand_response_files(raw_args):
     return expanded_args
 
 
-def generate_blacklist(blacklists):
+def get_dir_or_file_contents(blacklists):
     temp_list = []
     for b in blacklists:
         path = os.path.abspath(b)
@@ -310,11 +316,14 @@ def parse_scrapeler_args(batch_args=None):
     else:
         directory = datetime.datetime.now().strftime('{0} %Y%m%d_%H%M').format(parsed_args.tags[0])
 
-    blacklist = generate_blacklist(parsed_args.blacklist) if parsed_args.blacklist is not None else []
+    blacklist = get_dir_or_file_contents(parsed_args.blacklist) if parsed_args.blacklist is not None else []
 
+    already_saved = []
     save_path = os.path.abspath(directory)
     if not os.path.exists(save_path):
         os.makedirs(save_path)
+    else:
+        already_saved = get_dir_or_file_contents(save_path)
 
     temp_include = []
     for tag in parsed_args.tags:
@@ -344,7 +353,8 @@ def parse_scrapeler_args(batch_args=None):
         'base_delay': 4,
         'short': parsed_args.shortcircuit,
         'batch': parsed_args.batch,
-        'blacklist': blacklist if parsed_args.blacklist is not None else [],
+        'blacklist': blacklist,
+        'already_saved': already_saved,
         'debug': parsed_args.debug,
     }
 
@@ -414,27 +424,32 @@ def scrape_booru(scrapeler_args):
                         save_current = False
                         filter_reasons.append(tag)
 
-                if not scrapeler_args['scanonly']:
-                    img_fn = id_regex.search(result.attrs['src']).group(1)
-                    refer_id = referer_regex.search(result.attrs['src']).group(0)[1:]
-                    if scrapeler_args['blacklist'] and img_fn.split('.')[0] in scrapeler_args['blacklist']:
-                        print('[{}] [FILTER] {} was filtered. Blacklisted: {}'.format(datetime.datetime.now(),
-                                                                                      referer_base.format(refer_id),
-                                                                                      img_fn.split('.')[0]))
-                        continue
-                    if save_current:
-                        image_file_path = "{directory}\\{fn}".format(directory=scrapeler_args['scrape_save_directory'],
-                                                                     fn=img_fn)
-                        director.job_queue.put((scrape_url, referer_base.format(refer_id), image_file_path))
-                        print('[{}] [QUEUED] {} was queued for download.'.format(datetime.datetime.now(),
-                                                                                 referer_base.format(refer_id)))
-                        delay = scrapeler_args['base_delay'] + random.uniform(0, 2)
-                        time.sleep(delay)
+                if scrapeler_args['scanonly']:
+                    continue
 
-                    elif not save_current:
-                        print('[{}] [FILTER] {} was filtered. Matched: {}.'.format(datetime.datetime.now(),
-                                                                                   referer_base.format(refer_id),
-                                                                                   filter_reasons))
+                img_fn = id_regex.search(result.attrs['src']).group(1)
+                refer_id = referer_regex.search(result.attrs['src']).group(0)[1:]
+                if scrapeler_args['blacklist'] and img_fn.split('.')[0] in scrapeler_args['blacklist']:
+                    print('[{}] [BLACKLISTED] {} was filtered. Blacklisted.'.format(datetime.datetime.now(),
+                                                                                    img_fn.split('.')[0]))
+                    continue
+                if scrapeler_args['already_saved'] and img_fn.split('.')[0] in scrapeler_args['already_saved']:
+                    print('[{}] [SKIPPED] {} was skipped. Already saved.'.format(datetime.datetime.now(),
+                                                                                 img_fn.split('.')[0]))
+                    continue
+
+                if save_current:
+                    image_file_path = "{directory}\\{fn}".format(directory=scrapeler_args['scrape_save_directory'],
+                                                                 fn=img_fn)
+                    director.job_queue.put((scrape_url, referer_base.format(refer_id), image_file_path))
+                    print('[{}] [QUEUED] {} was queued for download.'.format(datetime.datetime.now(),
+                                                                             referer_base.format(refer_id)))
+                    delay = scrapeler_args['base_delay'] + random.uniform(0, 2)
+                    time.sleep(delay)
+                elif not save_current:
+                    print('[{}] [FILTERED] {} was filtered. Matched: {}.'.format(datetime.datetime.now(),
+                                                                                 referer_base.format(refer_id),
+                                                                                 filter_reasons))
 
         # Wait for workers to finish before going to the next page, or short circuiting will behave weirdly.
         if director.has_active_workers():
