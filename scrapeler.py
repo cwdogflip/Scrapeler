@@ -103,7 +103,7 @@ class ScrapelerDirector(threading.Thread):
                     self.__current_saved_count += 1
                     self.__total_saved_count += 1
                 if w.errors:
-                    self.__worker_errors.append(w.errors.pop())
+                    self.__worker_errors.extend(w.errors)
                 w.join()
                 self.__workers.remove(w)
 
