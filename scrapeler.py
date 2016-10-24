@@ -1,20 +1,23 @@
 # -*- coding: utf-8 -*-
-from __future__ import print_function
-from __future__ import unicode_literals
+from __future__ import print_function, unicode_literals, absolute_import
 
 import argparse
 import codecs
 import datetime
 import os
-import queue
 import random
 import re
 import signal
 import sys
 import threading
 import time
-import urllib
 from functools import wraps
+
+# Python 2 to 3 compatibility
+try:
+    import queue as _queue
+except ImportError:
+    import Queue as _queue
 
 import requests
 from bs4 import BeautifulSoup
@@ -92,7 +95,7 @@ class ScrapelerDirector(threading.Thread):
         self.__total_saved_count = 0
         self.__worker_errors = []
 
-        self.job_queue = queue.PriorityQueue()
+        self.job_queue = _queue.PriorityQueue()
         self.quit_event = threading.Event()
 
     # Remove dead workers from list.
@@ -327,14 +330,14 @@ def parse_scrapeler_args(batch_args=None):
 
     temp_include = []
     for tag in parsed_args.tags:
-        temp_include.append(urllib.parse.quote(tag))
-    include_tags = ''.join('%s+' % x.replace('&', '%26').replace(':', '%3a') for x in temp_include)
+        temp_include.append(requests.utils.quote(tag, safe=''))
+    include_tags = '+'.join(requests.utils.quote(x, safe='') for x in temp_include)
 
     if parsed_args.exclude is not None:
         temp_exclude = []
         for tag in parsed_args.exclude:
-            temp_exclude.append(urllib.parse.quote(tag))
-        exclude_tags = ''.join('-%s+' % x.replace('&', '%26').replace(':', '%3a') for x in temp_exclude)
+            temp_exclude.append(requests.utils.quote(tag, safe=''))
+        exclude_tags = '-'.join(requests.utils.quote(x, safe='') for x in temp_exclude)
     else:
         exclude_tags = ''
 
@@ -365,7 +368,7 @@ def parse_scrapeler_args(batch_args=None):
 def get_soup(url):
     with requests.Session() as sess:
         response = sess.get(url, data=None, headers={
-            'User-Agent': UserAgent().random,
+            'User-Agent': UserAgent().firefox,
             'Accept': '''text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8''',
             'Connection': 'keep-alive',
         })
