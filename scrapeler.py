@@ -331,13 +331,13 @@ def parse_scrapeler_args(batch_args=None):
     temp_include = []
     for tag in parsed_args.tags:
         temp_include.append(requests.utils.quote(tag, safe=''))
-    include_tags = ''.join('%s+' % requests.utils.quote(x, safe='') for x in temp_include)
+    include_tags = ''.join('%s+' % x for x in temp_include)
 
     if parsed_args.exclude is not None:
         temp_exclude = []
         for tag in parsed_args.exclude:
             temp_exclude.append(requests.utils.quote(tag, safe=''))
-        exclude_tags = ''.join('-%s+' % requests.utils.quote(x, safe='') for x in temp_exclude)
+        exclude_tags = ''.join('-%s+' % x for x in temp_exclude)
     else:
         exclude_tags = ''
 
