@@ -4,6 +4,7 @@ from __future__ import print_function, unicode_literals, absolute_import
 import argparse
 import codecs
 import datetime
+import logging
 import os
 import random
 import re
@@ -30,6 +31,12 @@ id_regex = re.compile(r'(?<=thumbnail_)([\da-f]*\.jpg|\.png|\.gif)')
 sample_retrieve_regex = re.compile(r'(?<=.com//)(images/[\da-f]{2}/[\da-f]{2}\.jpg|\.png|\.gif)')
 referer_regex = re.compile(r'\?[\da-f]*')
 
+logger = logging.getLogger('scrapeler')
+logger.setLevel(logging.DEBUG)
+stdout = logging.StreamHandler(sys.stdout)
+stdout.setLevel(logging.DEBUG)
+logger.addHandler(stdout)
+
 
 # Decorators
 def retry(caught_exceptions=(ConnectionRefusedError, requests.ConnectionError, requests.HTTPError),
@@ -45,7 +52,7 @@ def retry(caught_exceptions=(ConnectionRefusedError, requests.ConnectionError, r
                 except caught_exceptions as e:
                     msg = "[{ts}] [CONNECTION] Caught {e}. Retrying in {sec}" \
                         .format(ts=datetime.datetime.now(), e=e, sec=current_delay)
-                    print(msg)
+                    logger.warning(msg)
                     time.sleep(current_delay)
                     tries_left -= 1
                     current_delay *= back_off
@@ -73,7 +80,7 @@ class InterruptManager(object):
 
     def handler(self, sig, frame):
         self.signal_received = (sig, frame)
-        print('Received interrupt signal. Scrapeler will stop shortly.')
+        logger.info('Received interrupt signal. Scrapeler will stop shortly.')
 
     def __exit__(self, typ, val, traceback):
         signal.signal(signal.SIGINT, self.old_handler)
@@ -209,11 +216,11 @@ class ScrapelerDirector(threading.Thread):
                         time.sleep(delay)
                         ret = self.__save_image(subpage_id, current_img, image_file_path)
                     else:
-                        print('[{}] [INFO] {} skipped: Already saved.'.format(datetime.datetime.now(), current_img))
+                        logger.info(
+                            '[{}] [INFO] {} skipped: Already saved.'.format(datetime.datetime.now(), current_img))
                 except Exception as e:
-                    print(
-                        '[{}] [ERROR] Unhandled exception during route_through_subpage: {}'.format(
-                            datetime.datetime.now(), e))
+                    logger.info('[{}] [ERROR] Unhandled exception during route_through_subpage: {}'.format(
+                        datetime.datetime.now(), e))
             return ret
 
         @retry()
@@ -229,8 +236,8 @@ class ScrapelerDirector(threading.Thread):
                     response.raise_for_status()
 
                 if response.status_code == 404:
-                    print('[{}] [ERROR] Could not save {}. 404: File Not found.'.format(datetime.datetime.now(),
-                                                                                        current_img))
+                    logger.info('[{}] [ERROR] Could not save {}. 404: File Not found.'.format(datetime.datetime.now(),
+                                                                                              current_img))
                     return 0
 
                 try:
@@ -239,12 +246,13 @@ class ScrapelerDirector(threading.Thread):
                             for chunk in response.iter_content(chunk_size=1024):
                                 if chunk:  # filter out keep-alive new chunks
                                     f.write(chunk)
-                            print(
-                                '[{}] [SAVED] {} was saved successfully.'.format(datetime.datetime.now(), current_img))
+                            logger.info('[{}] [SAVED] {} was saved successfully.'
+                                        .format(datetime.datetime.now(), current_img))
                             return 1
 
                 except Exception as e:
-                    print('[{}] [ERROR] Unhandled exception during save_image: {}'.format(datetime.datetime.now(), e))
+                    logger.exception('[{}] [ERROR] Unhandled exception during save_image: {}'
+                                     .format(datetime.datetime.now(), e))
                     return 0
 
 
@@ -387,7 +395,7 @@ def scrape_booru(scrapeler_args):
     final_page = scrapeler_args['pagelimit']
 
     if scrapeler_args['debug']:
-        print('[{}] Starting.'.format(datetime.datetime.now()))
+        logger.info('[{}] Starting.'.format(datetime.datetime.now()))
 
     director = ScrapelerDirector()
     director.start()
@@ -399,7 +407,7 @@ def scrape_booru(scrapeler_args):
         delay = scrapeler_args['base_delay'] + random.uniform(1, 3)
         time.sleep(delay)
         scrape_url = main_url_base.format(url_tags=url_tags, pid=str(42 * (page - 1)))
-        print('\n[{}] [NEW PAGE] Scraping: {}, (page {})'.format(datetime.datetime.now(), scrape_url, page))
+        logger.info('\n[{}] [NEW PAGE] Scraping: {}, (page {})'.format(datetime.datetime.now(), scrape_url, page))
 
         scrape_soup = get_soup(scrape_url)
         results = scrape_soup.findAll('img', class_='preview')
@@ -408,12 +416,9 @@ def scrape_booru(scrapeler_args):
         if len(results) < 42:
             keep_scraping = False
 
-        print('[{}] [INFO] {} results on page\n'.format(datetime.datetime.now(), len(results)))
+        logger.info('[{}] [INFO] {} results on page\n'.format(datetime.datetime.now(), len(results)))
 
         for count, result in enumerate(results):
-            if scrapeler_args['debug']:
-                print('[{}] [DEBUG] Scraping image {}'.format(datetime.datetime.now(), count))
-
             with InterruptManager(director=director):
                 save_current = True
                 filter_reasons = []
@@ -433,46 +438,50 @@ def scrape_booru(scrapeler_args):
                 img_fn = id_regex.search(result.attrs['src']).group(1)
                 refer_id = referer_regex.search(result.attrs['src']).group(0)[1:]
                 if scrapeler_args['blacklist'] and img_fn.split('.')[0] in scrapeler_args['blacklist']:
-                    print('[{}] [BLACKLISTED] {} was filtered. Blacklisted.'.format(datetime.datetime.now(),
-                                                                                    img_fn.split('.')[0]))
+                    logger.info('[{}] [BLACKLISTED] [{}] {} was filtered. Blacklisted.'
+                                .format(datetime.datetime.now(), count,
+                                        img_fn.split('.')[0]))
                     continue
                 if scrapeler_args['already_saved'] and img_fn.split('.')[0] in scrapeler_args['already_saved']:
-                    print('[{}] [SKIPPED] {} was skipped. Already saved.'.format(datetime.datetime.now(),
-                                                                                 img_fn.split('.')[0]))
+                    logger.info(
+                        '[{}] [SKIPPED] [{}] {} was skipped. Already saved.'.format(datetime.datetime.now(), count,
+                                                                                    img_fn.split('.')[0]))
                     continue
 
                 if save_current:
                     image_file_path = "{directory}\\{fn}".format(directory=scrapeler_args['scrape_save_directory'],
                                                                  fn=img_fn)
                     director.job_queue.put((scrape_url, referer_base.format(refer_id), image_file_path))
-                    print('[{}] [QUEUED] {} was queued for download.'.format(datetime.datetime.now(),
-                                                                             referer_base.format(refer_id)))
+                    logger.info('[{}] [QUEUED] [{}] {} was queued for download.'.format(datetime.datetime.now(), count,
+                                                                                        referer_base.format(refer_id)))
                     delay = scrapeler_args['base_delay'] + random.uniform(0, 2)
                     time.sleep(delay)
                 elif not save_current:
-                    print('[{}] [FILTERED] {} was filtered. Matched: {}.'.format(datetime.datetime.now(),
-                                                                                 referer_base.format(refer_id),
-                                                                                 filter_reasons))
+                    logger.info(
+                        '[{}] [FILTERED] [{}] {} was filtered. Matched: {}.'.format(datetime.datetime.now(), count,
+                                                                                    referer_base.format(refer_id),
+                                                                                    filter_reasons))
 
         # Wait for workers to finish before going to the next page, or short circuiting will behave weirdly.
         if director.has_active_workers():
-            print('[{}] [INFO] Waiting for current downloads to finish.'.format(datetime.datetime.now()))
+            logger.info('[{}] [INFO] Waiting for current downloads to finish.'.format(datetime.datetime.now()))
             while director.has_active_workers():
                 time.sleep(.1)
 
         if not scrapeler_args['scanonly']:
-            print('[{}] [PROGRESS] {} images saved for page {}. ({} images saved in total.)'
-                  .format(datetime.datetime.now(), director.get_current_saved_count(),
-                          page, director.get_total_saved_count()))
+            logger.info('[{}] [PROGRESS] {} images saved for page {}. ({} images saved in total.)'
+                        .format(datetime.datetime.now(), director.get_current_saved_count(),
+                                page, director.get_total_saved_count()))
 
         if scrapeler_args['short'] and not scrapeler_args['scanonly'] and director.get_current_saved_count() == 0:
-            print('[{}] [DONE] No images saved with on page {} with shortcircuit on. Stopping.'
-                  .format(datetime.datetime.now(), page))
+            logger.info('[{}] [DONE] No images saved with on page {} with shortcircuit on. Stopping.'
+                        .format(datetime.datetime.now(), page))
             keep_scraping = False
 
         page += 1
         if -1 < final_page == page:
-            print('[{}] [DONE] Page limit ({}) was reached. Stopping.'.format(datetime.datetime.now(), final_page))
+            logger.info(
+                '[{}] [DONE] Page limit ({}) was reached. Stopping.'.format(datetime.datetime.now(), final_page))
             keep_scraping = False
 
     director.quit_event.set()
@@ -521,21 +530,22 @@ def main():
     try:
         perform_gelbooru_scrape(scrapeler_args)
     except Exception as ex:
-        print('[{ts}] Unhandled exception {e} occurred during command {c}'.format(ts=datetime.datetime.now(),
-                                                                                  e=ex, c=scrapeler_args['tags']))
+        logger.error('[{ts}] Unhandled exception {e} occurred during command {c}'.format(ts=datetime.datetime.now(),
+                                                                                         e=ex,
+                                                                                         c=scrapeler_args['tags']))
 
     if scrapeler_args['batch']:
         batch_file = scrapeler_args['batch']
         for command in batch_file:
             try:
                 delay = random.uniform(300, 450)
-                print('[{0}] Sleeping for {1} seconds between commands.'.format(datetime.datetime.now(), delay))
+                logger.info('[{0}] Sleeping for {1} seconds between commands.'.format(datetime.datetime.now(), delay))
                 time.sleep(delay)
                 perform_gelbooru_scrape(parse_scrapeler_args(command))
             except Exception as ex:
-                print('[{ts}] Unhandled exception {e} occurred during command {c}'
-                      .format(ts=datetime.datetime.now(), e=ex, c=command))
-        print('Finished.')
+                logger.error('[{ts}] Unhandled exception {e} occurred during command {c}'
+                             .format(ts=datetime.datetime.now(), e=ex, c=command))
+    print('Finished.')
 
 
 if __name__ == '__main__':
