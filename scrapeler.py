@@ -20,6 +20,13 @@ try:
 except ImportError:
     import Queue as _queue
 
+try:
+    raise ConnectionRefusedError
+except NameError:
+    ConnectionRefusedError = OSError
+except Exception:
+    pass
+
 import requests
 from bs4 import BeautifulSoup
 from fake_useragent import UserAgent
