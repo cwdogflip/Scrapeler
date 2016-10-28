@@ -31,18 +31,19 @@ import requests
 from bs4 import BeautifulSoup
 from fake_useragent import UserAgent
 
-main_url_base = r'http://gelbooru.com/index.php?page=post&s=list&tags={url_tags}&pid={pid}'
-grab_url_base = r'http://gelbooru.com//images/{0}/{1}/{2}'
-referer_base = r'http://gelbooru.com/index.php?page=post&s=view&id={0}'
-id_regex = re.compile(r'(?<=thumbnail_)([\da-f]*\.jpg|\.png|\.gif)')
-sample_retrieve_regex = re.compile(r'(?<=.com//)(images/[\da-f]{2}/[\da-f]{2}\.jpg|\.png|\.gif)')
-referer_regex = re.compile(r'\?[\da-f]*')
+image_directory_template = r'http://gelbooru.com/index.php?page=post&s=list&tags={url_tags}&pid={pid}'
+image_url_location_template = r'http://gelbooru.com//images/{0}/{1}/{2}'
+image_header_referer_template = r'http://gelbooru.com/index.php?page=post&s=view&id={0}'
+id_regex = re.compile(r'(?<=thumbnail_)([\da-fA-F]*\.jpg|\.png|\.gif)')  # thumbnail_(?P<image_md5>[\da-fA-F]*)\.(jpg|jpeg|png|gif|webm)
+referer_id_regex = re.compile(r'\?[\da-f]*')  # \?(?P<refer_id>[\da-f]*)
 
 logger = logging.getLogger('scrapeler')
 logger.setLevel(logging.DEBUG)
 stdout = logging.StreamHandler(sys.stdout)
 stdout.setLevel(logging.DEBUG)
 logger.addHandler(stdout)
+
+report_lock = threading.Lock()
 
 
 # Decorators
@@ -100,6 +101,7 @@ class InterruptManager(object):
                 exit('Scrapeler was interrupted and has stopped.')
 
 
+# TODO Refactor this so workers are persistent for a group of images.
 class ScrapelerDirector(threading.Thread):
     def __init__(self, max_workers=4):
         threading.Thread.__init__(self)
@@ -209,8 +211,9 @@ class ScrapelerDirector(threading.Thread):
                             result = result[:result.find('"')]
                             current_img = split_url[0] + '.' + result
 
-                        # this logic is fucked but I don't care
-                        extension = current_img.split('?')[0][-5:].split('.')[1]
+                        extension = re.search(r'(?<=/)(?P<hex_string>[a-fA-F\d]+)\.(?P<extension>\w{3,4})',
+                                              current_img).group('extension')
+
                         # image file path always starts life as a .jpg, since that's always what the thumbnails are.
                         image_file_path = image_file_path[:-3] + extension
                     else:
@@ -222,7 +225,7 @@ class ScrapelerDirector(threading.Thread):
                         delay = 3 + random.uniform(3, 4)
                         time.sleep(delay)
                         ret = self.__save_image(subpage_id, current_img, image_file_path)
-                    else:
+                    else:  # Do this check again, even though it was done in the main loop.
                         logger.info(
                             '[{}] [INFO] {} skipped: Already saved.'.format(datetime.datetime.now(), current_img))
                 except Exception as e:
@@ -278,15 +281,18 @@ def expand_response_files(raw_args):
     return expanded_args
 
 
-def get_dir_or_file_contents(blacklists):
+def get_dir_or_file_contents(paths):
     temp_list = []
-    for b in blacklists:
-        path = os.path.abspath(b)
+    if not type(paths) is list:
+        paths = [paths]
+
+    for p in paths:
+        path = os.path.abspath(p)
         if os.path.exists(path):
             if os.path.isfile(path):
                 with open(path, 'r') as file:
                     contents = file.read()
-                    temp_list.extend(contents if type(contents) == list else [contents])
+                    temp_list.extend(contents if type(contents) is list else [contents]) #TODO this is probably broken.
             elif os.path.isdir(path):
                 files = os.listdir(path)
                 temp_list.extend(files)
@@ -341,7 +347,7 @@ def parse_scrapeler_args(batch_args=None):
     if not os.path.exists(save_path):
         os.makedirs(save_path)
     else:
-        already_saved = get_dir_or_file_contents(save_path)
+        already_saved = get_dir_or_file_contents([save_path])
 
     temp_include = []
     for tag in parsed_args.tags:
@@ -413,7 +419,7 @@ def scrape_booru(scrapeler_args):
 
         delay = scrapeler_args['base_delay'] + random.uniform(1, 3)
         time.sleep(delay)
-        scrape_url = main_url_base.format(url_tags=url_tags, pid=str(42 * (page - 1)))
+        scrape_url = image_directory_template.format(url_tags=url_tags, pid=str(42 * (page - 1)))
         logger.info('\n[{}] [NEW PAGE] Scraping: {}, (page {})'.format(datetime.datetime.now(), scrape_url, page))
 
         scrape_soup = get_soup(scrape_url)
@@ -443,7 +449,7 @@ def scrape_booru(scrapeler_args):
                     continue
 
                 img_fn = id_regex.search(result.attrs['src']).group(1)
-                refer_id = referer_regex.search(result.attrs['src']).group(0)[1:]
+                refer_id = referer_id_regex.search(result.attrs['src']).group(0)[1:]
                 if scrapeler_args['blacklist'] and img_fn.split('.')[0] in scrapeler_args['blacklist']:
                     logger.info('[{}] [BLACKLISTED] [{}] {} was filtered. Blacklisted.'
                                 .format(datetime.datetime.now(), count,
@@ -451,22 +457,23 @@ def scrape_booru(scrapeler_args):
                     continue
                 if scrapeler_args['already_saved'] and img_fn.split('.')[0] in scrapeler_args['already_saved']:
                     logger.info(
-                        '[{}] [SKIPPED] [{}] {} was skipped. Already saved.'.format(datetime.datetime.now(), count,
-                                                                                    img_fn.split('.')[0]))
+                        '[{}] [SKIPPED] [{}] {} was skipped. Already saved. ({})'.format(datetime.datetime.now(), count,
+                                                                                         image_header_referer_template.format(refer_id),
+                                                                                         img_fn.split('.')[0]))
                     continue
 
                 if save_current:
                     image_file_path = "{directory}\\{fn}".format(directory=scrapeler_args['scrape_save_directory'],
                                                                  fn=img_fn)
-                    director.job_queue.put((scrape_url, referer_base.format(refer_id), image_file_path))
+                    director.job_queue.put((scrape_url, image_header_referer_template.format(refer_id), image_file_path))
                     logger.info('[{}] [QUEUED] [{}] {} was queued for download.'.format(datetime.datetime.now(), count,
-                                                                                        referer_base.format(refer_id)))
+                                                                                        image_header_referer_template.format(refer_id)))
                     delay = scrapeler_args['base_delay'] + random.uniform(0, 2)
                     time.sleep(delay)
                 elif not save_current:
                     logger.info(
                         '[{}] [FILTERED] [{}] {} was filtered. Matched: {}.'.format(datetime.datetime.now(), count,
-                                                                                    referer_base.format(refer_id),
+                                                                                    image_header_referer_template.format(refer_id),
                                                                                     filter_reasons))
 
         # Wait for workers to finish before going to the next page, or short circuiting will behave weirdly.
