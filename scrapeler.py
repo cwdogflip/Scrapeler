@@ -34,7 +34,7 @@ from fake_useragent import UserAgent
 image_directory_template = r'http://gelbooru.com/index.php?page=post&s=list&tags={url_tags}&pid={pid}'
 image_url_location_template = r'http://gelbooru.com//images/{0}/{1}/{2}'
 image_header_referer_template = r'http://gelbooru.com/index.php?page=post&s=view&id={0}'
-id_regex = re.compile(r'(?<=thumbnail_)([\da-fA-F]*\.jpg|\.png|\.gif)')  # thumbnail_(?P<image_md5>[\da-fA-F]*)\.(jpg|jpeg|png|gif|webm)
+id_regex = re.compile(r'(?P<image_md5>[\da-fA-F]*)\.(?P<ext>jpg|jpeg|png|gif|webm)')
 referer_id_regex = re.compile(r'\?[\da-f]*')  # \?(?P<refer_id>[\da-f]*)
 
 logger = logging.getLogger('scrapeler')
@@ -43,6 +43,7 @@ stdout = logging.StreamHandler(sys.stdout)
 stdout.setLevel(logging.DEBUG)
 logger.addHandler(stdout)
 
+__USER_AGENT__ = UserAgent().firefox
 report_lock = threading.Lock()
 
 
@@ -136,11 +137,13 @@ class ScrapelerDirector(threading.Thread):
     def get_current_saved_count(self):
         return self.__current_saved_count
 
-    # This probably technically isn't threadsafe, but downloads take long enough that it's probably fine.
+    # This probably technically isn't threadsafe
     def has_active_workers(self):
         for w in self.__workers:
             if w.is_alive():
                 return True
+
+        self.__prune__()
         return False
 
     def wait_for_workers(self):
@@ -183,10 +186,10 @@ class ScrapelerDirector(threading.Thread):
                 self.errors.append(e)
 
         @retry()
-        def __route_through_subpage(self, directory_page, subpage_id, image_file_path):
+        def __route_through_subpage(self, directory_page, subpage_id, image_save_path):
             ret = 0
             request_headers = {
-                'User-Agent': UserAgent().firefox,
+                'User-Agent': __USER_AGENT__,
                 'Referer': directory_page,
             }
             with requests.Session() as sess:
@@ -211,59 +214,56 @@ class ScrapelerDirector(threading.Thread):
                             result = result[:result.find('"')]
                             current_img = split_url[0] + '.' + result
 
-                        extension = re.search(r'(?<=/)(?P<hex_string>[a-fA-F\d]+)\.(?P<extension>\w{3,4})',
+                        extension = re.search(r'(?P<extension>\.(jpg|jpeg|gif|png))',
                                               current_img).group('extension')
 
-                        # image file path always starts life as a .jpg, since that's always what the thumbnails are.
-                        image_file_path = image_file_path[:-3] + extension
+                        image_save_path += extension
                     else:
-                        img_tag = soup.find('source')
-                        current_img = img_tag.attrs['src']
-                        image_file_path = image_file_path[:-3] + 'webm'
+                        # No need to try to find extensions here.
+                        webm_tag = soup.find('source')
+                        current_img = webm_tag.attrs['src']
+                        image_save_path += '.webm'
 
-                    if not os.path.exists(image_file_path):
-                        delay = 3 + random.uniform(3, 4)
-                        time.sleep(delay)
-                        ret = self.__save_image(subpage_id, current_img, image_file_path)
-                    else:  # Do this check again, even though it was done in the main loop.
-                        logger.info(
-                            '[{}] [INFO] {} skipped: Already saved.'.format(datetime.datetime.now(), current_img))
+                    delay = 3 + random.uniform(3, 4)
+                    time.sleep(delay)
+                    ret = self.__save_image(subpage_id, current_img, image_save_path)
+
                 except Exception as e:
                     logger.info('[{}] [ERROR] Unhandled exception during route_through_subpage: {}'.format(
                         datetime.datetime.now(), e))
             return ret
 
         @retry()
-        def __save_image(self, referencing_page, current_img, save_to):
+        def __save_image(self, referencing_subpage_id, current_img, image_save_path):
             request_headers = {
-                'User-Agent': UserAgent().firefox,
-                'Referer': referencing_page
+                'User-Agent': __USER_AGENT__,
+                'Referer': referencing_subpage_id
             }
             with requests.Session() as sess:
                 response = sess.get(current_img, data=None, stream=True, headers=request_headers)
 
-                if response.status_code >= 500:
-                    response.raise_for_status()
-
-                if response.status_code == 404:
-                    logger.info('[{}] [ERROR] Could not save {}. 404: File Not found.'.format(datetime.datetime.now(),
-                                                                                              current_img))
-                    return 0
-
-                try:
-                    if response.status_code == 200:
-                        with open(save_to, 'wb') as f:
+                if response.status_code == 200:
+                    try:
+                        with open(image_save_path, 'wb') as f:
                             for chunk in response.iter_content(chunk_size=1024):
                                 if chunk:  # filter out keep-alive new chunks
                                     f.write(chunk)
                             logger.info('[{}] [SAVED] {} was saved successfully.'
                                         .format(datetime.datetime.now(), current_img))
                             return 1
+                    except Exception as e:
+                        logger.exception('[{}] [ERROR] Unhandled exception during save_image: {}'
+                                         .format(datetime.datetime.now(), e))
 
-                except Exception as e:
-                    logger.exception('[{}] [ERROR] Unhandled exception during save_image: {}'
-                                     .format(datetime.datetime.now(), e))
+                elif response.status_code >= 500:
+                    response.raise_for_status()
+                elif response.status_code == 404:
+                    logger.info('[{}] [ERROR] Could not save {}. 404: File Not found.'.format(datetime.datetime.now(),
+                                                                                              current_img))
                     return 0
+                else:
+                    logger.info('Unknown Status code: {}'.format(response.status_code))
+                return 0
 
 
 # Shoutout to Dogflip for writing this
@@ -292,7 +292,9 @@ def get_dir_or_file_contents(paths):
             if os.path.isfile(path):
                 with open(path, 'r') as file:
                     contents = file.read()
-                    temp_list.extend(contents if type(contents) is list else [contents]) #TODO this is probably broken.
+                    temp_list.extend(
+                        contents if type(contents) is list else contents.split()
+                    )
             elif os.path.isdir(path):
                 files = os.listdir(path)
                 temp_list.extend(files)
@@ -374,7 +376,7 @@ def parse_scrapeler_args(batch_args=None):
         'page': parsed_args.page,
         'pagelimit': (parsed_args.pagelimit + parsed_args.page if parsed_args.pagelimit > 0 else -1),
         'scanonly': parsed_args.scanonly,
-        'base_delay': 4,
+        'base_delay': 7,
         'short': parsed_args.shortcircuit,
         'batch': parsed_args.batch,
         'blacklist': blacklist,
@@ -389,7 +391,7 @@ def parse_scrapeler_args(batch_args=None):
 def get_soup(url):
     with requests.Session() as sess:
         response = sess.get(url, data=None, headers={
-            'User-Agent': UserAgent().firefox,
+            'User-Agent': __USER_AGENT__,
             'Accept': '''text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8''',
             'Connection': 'keep-alive',
         })
@@ -417,7 +419,7 @@ def scrape_booru(scrapeler_args):
     while keep_scraping:
         director.signal_new_page()
 
-        delay = scrapeler_args['base_delay'] + random.uniform(1, 3)
+        delay = scrapeler_args['base_delay'] + random.uniform(0, 2)
         time.sleep(delay)
         scrape_url = image_directory_template.format(url_tags=url_tags, pid=str(42 * (page - 1)))
         logger.info('\n[{}] [NEW PAGE] Scraping: {}, (page {})'.format(datetime.datetime.now(), scrape_url, page))
@@ -431,7 +433,7 @@ def scrape_booru(scrapeler_args):
 
         logger.info('[{}] [INFO] {} results on page\n'.format(datetime.datetime.now(), len(results)))
 
-        for count, result in enumerate(results):
+        for count, result in enumerate(results, 1):
             with InterruptManager(director=director):
                 save_current = True
                 filter_reasons = []
@@ -448,39 +450,46 @@ def scrape_booru(scrapeler_args):
                 if scrapeler_args['scanonly']:
                     continue
 
-                img_fn = id_regex.search(result.attrs['src']).group(1)
+                image_md5 = id_regex.search(result.attrs['src']).group('image_md5')
                 refer_id = referer_id_regex.search(result.attrs['src']).group(0)[1:]
-                if scrapeler_args['blacklist'] and img_fn.split('.')[0] in scrapeler_args['blacklist']:
+                if scrapeler_args['blacklist'] and image_md5 in scrapeler_args['blacklist']:
                     logger.info('[{}] [BLACKLISTED] [{}] {} was filtered. Blacklisted.'
                                 .format(datetime.datetime.now(), count,
-                                        img_fn.split('.')[0]))
+                                        image_md5))
                     continue
-                if scrapeler_args['already_saved'] and img_fn.split('.')[0] in scrapeler_args['already_saved']:
+                if scrapeler_args['already_saved'] and image_md5 in scrapeler_args['already_saved']:
                     logger.info(
-                        '[{}] [SKIPPED] [{}] {} was skipped. Already saved. ({})'.format(datetime.datetime.now(), count,
-                                                                                         image_header_referer_template.format(refer_id),
-                                                                                         img_fn.split('.')[0]))
+                        '[{}] [SKIPPED] [{}] {} was skipped. Already saved. ({})'
+                            .format(datetime.datetime.now(), count, image_header_referer_template.format(refer_id),
+                                    image_md5))
                     continue
 
                 if save_current:
                     image_file_path = "{directory}\\{fn}".format(directory=scrapeler_args['scrape_save_directory'],
-                                                                 fn=img_fn)
-                    director.job_queue.put((scrape_url, image_header_referer_template.format(refer_id), image_file_path))
-                    logger.info('[{}] [QUEUED] [{}] {} was queued for download.'.format(datetime.datetime.now(), count,
-                                                                                        image_header_referer_template.format(refer_id)))
-                    delay = scrapeler_args['base_delay'] + random.uniform(0, 2)
-                    time.sleep(delay)
+                                                                 fn=image_md5)
+                    director.job_queue.put(
+                        [scrape_url, image_header_referer_template.format(refer_id), image_file_path]
+                    )
+                    logger.info('[{}] [QUEUED] [{}] {} was queued for download.'
+                                .format(datetime.datetime.now(), count, image_header_referer_template.format(refer_id)))
+                    time.sleep(1)
+
                 elif not save_current:
                     logger.info(
-                        '[{}] [FILTERED] [{}] {} was filtered. Matched: {}.'.format(datetime.datetime.now(), count,
-                                                                                    image_header_referer_template.format(refer_id),
-                                                                                    filter_reasons))
+                        '[{}] [FILTERED] [{}] {} was filtered. Matched: {}.'
+                            .format(datetime.datetime.now(), count, image_header_referer_template.format(refer_id),
+                                    filter_reasons))
 
         # Wait for workers to finish before going to the next page, or short circuiting will behave weirdly.
         if director.has_active_workers():
             logger.info('[{}] [INFO] Waiting for current downloads to finish.'.format(datetime.datetime.now()))
+            updater = 0
             while director.has_active_workers():
                 time.sleep(.1)
+                updater += 1
+                if not (updater % 100):
+                    logger.info('[{}] [INFO] Still working...'
+                                .format(datetime.datetime.now()))
 
         if not scrapeler_args['scanonly']:
             logger.info('[{}] [PROGRESS] {} images saved for page {}. ({} images saved in total.)'
