@@ -14,11 +14,19 @@ import threading
 import time
 from functools import wraps
 
-# Python 2 to 3 compatibility
+# Attempts at compatibility with Python2.7
 try:
     import queue as _queue
 except ImportError:
     import Queue as _queue
+
+try:
+    from threading import main_thread
+except ImportError:
+    def main_thread():
+        for t in threading.enumerate():
+            if t.name == "MainThread":
+                return t
 
 try:
     raise ConnectionRefusedError
@@ -44,18 +52,17 @@ stdout.setLevel(logging.DEBUG)
 logger.addHandler(stdout)
 
 __USER_AGENT__ = UserAgent().firefox
-report_lock = threading.Lock()
 
 
 # Decorators
 def retry(caught_exceptions=(ConnectionRefusedError, requests.ConnectionError, requests.HTTPError),
-          max_tries=4, base_delay=256, back_off=2):
+          max_tries=3, base_delay=16):
     def deco_retry(f):
         @wraps(f)
         def f_retry(*args, **kwargs):
             tries_left = max_tries
-            current_delay = base_delay + random.randint(0, base_delay) + random.uniform(0, 1)
-            while tries_left > 1:
+            current_delay = base_delay + random.uniform(0, 1)
+            while tries_left > 0:
                 try:
                     return f(*args, **kwargs)
                 except caught_exceptions as e:
@@ -64,7 +71,8 @@ def retry(caught_exceptions=(ConnectionRefusedError, requests.ConnectionError, r
                     logger.warning(msg)
                     time.sleep(current_delay)
                     tries_left -= 1
-                    current_delay *= back_off
+                    current_delay = base_delay * (2*(max_tries-tries_left)) + random.uniform(0, 1)
+
             # Try last time without a catch.
             return f(*args, **kwargs)
 
@@ -89,6 +97,8 @@ class InterruptManager(object):
 
     def handler(self, sig, frame):
         self.signal_received = (sig, frame)
+        if self._director:
+            self._director.quit_event.set()
         logger.info('Received interrupt signal. Scrapeler will stop shortly.')
 
     def __exit__(self, typ, val, traceback):
@@ -97,39 +107,54 @@ class InterruptManager(object):
             try:
                 self.old_handler(*self.signal_received)
             except KeyboardInterrupt:
-                if self._director:
-                    self._director.quit_event.set()
+                thread_prime = main_thread()
+                for thread in threading.enumerate():
+                    if thread is not thread_prime:
+                        thread.join()
                 exit('Scrapeler was interrupted and has stopped.')
 
 
 # TODO Refactor this so workers are persistent for a group of images.
 class ScrapelerDirector(threading.Thread):
-    def __init__(self, max_workers=4):
-        threading.Thread.__init__(self)
+    def __init__(self, max_workers=4,):
+        threading.Thread.__init__(self, target=self.direct)
         self.__max_workers = max_workers
         self.__workers = []
         self.__current_saved_count = 0
         self.__total_saved_count = 0
         self.__worker_errors = []
 
+        self.__count_lock = threading.Lock()
+        self.__worker_lock = threading.Lock()
+
         self.job_queue = _queue.PriorityQueue()
         self.quit_event = threading.Event()
+        self.active_workers_flag = threading.Event()
 
     # Remove dead workers from list.
-    def __prune__(self):
-        for w in self.__workers[:]:
-            if not w.is_alive():
-                if w.saved:
-                    self.__current_saved_count += 1
-                    self.__total_saved_count += 1
-                if w.errors:
-                    self.__worker_errors.extend(w.errors)
-                w.join()
-                self.__workers.remove(w)
+    def __upkeep(self):
+        with self.__worker_lock:
+            for w in self.__workers[:]:
+                w.join(.1)
+                # Check for thread still working
+                if not w.is_alive():
+                    if w.saved:
+                        self.__current_saved_count += 1
+                        self.__total_saved_count += 1
+                    if w.errors:
+                        self.__worker_errors.extend(w.errors)
+                    self.__workers.remove(w)
+                else:
+                    self.active_workers_flag.set()
+
+            # Clear worker flag
+            if not self.__workers:
+                self.active_workers_flag.clear()
 
     # called externally to let the director know counts need to be reset.
     def signal_new_page(self):
-        self.__current_saved_count = 0
+        with self.__count_lock:
+            self.__current_saved_count = 0
 
     def get_total_saved_count(self):
         return self.__total_saved_count
@@ -137,49 +162,47 @@ class ScrapelerDirector(threading.Thread):
     def get_current_saved_count(self):
         return self.__current_saved_count
 
-    # This probably technically isn't threadsafe
     def has_active_workers(self):
-        for w in self.__workers:
-            if w.is_alive():
-                return True
+        return self.active_workers_flag.is_set()
 
-        self.__prune__()
-        return False
-
-    def wait_for_workers(self):
-        for w in self.__workers:
-            w.join()
-
-    def report_errors(self):
-        pass  # TODO
+    def get_active_count(self):
+        with self.__worker_lock:
+            l = len(self.__workers)
+        return l
 
     def __assign_work(self):
-        # Don't let a director move on without assigning all work.
-        while not self.job_queue.empty():
-            # Fire dead workers first.
-            self.__prune__()
-            # Don't hire more than max workers
-            if len(self.__workers) < self.__max_workers:
-                new_hire = self.ScrapelerWorker(*self.job_queue.get())
-                new_hire.start()
-                self.__workers.append(new_hire)
-            time.sleep(.1)
+        # Don't let a director move on without assigning all work it can.
+        # Fire dead workers first.
+        self.__upkeep()
+        with self.__worker_lock:
+            while not self.job_queue.empty():
+                # Don't hire more than max workers
+                if len(self.__workers) < self.__max_workers and not self.job_queue.empty():
+                    new_hire = self.ScrapelerWorker(*self.job_queue.get())
+                    new_hire.start()
+                    self.__workers.append(new_hire)
+                    self.active_workers_flag.set()
+                else:
+                    break
+        time.sleep(.1)
 
-    def run(self):
+    def direct(self):
         while not self.quit_event.is_set():
             self.__assign_work()
 
         # Always wait for workers before quitting.
-        self.wait_for_workers()
+        while self.active_workers_flag.is_set():
+            self.__upkeep()
+            time.sleep(.1)
 
     class ScrapelerWorker(threading.Thread):
-        def __init__(self, *args, **kwargs):
-            threading.Thread.__init__(self)
+        def __init__(self, *args):
+            threading.Thread.__init__(self, target=self.work)
             self.__args = args
             self.saved = 0
             self.errors = []
 
-        def run(self):
+        def work(self):
             try:
                 self.saved = self.__route_through_subpage(*self.__args)
             except Exception as e:
@@ -396,6 +419,8 @@ def get_soup(url):
             'Connection': 'keep-alive',
         })
         if response.status_code == 200:
+            if re.search('[Ss]earch is overloaded[!.]', response.text):
+                raise requests.ConnectionError('Search temporarily overloaded. Trying again.')  # Trigger retry.
             return BeautifulSoup(response.text, "html5lib")
         elif response.status_code >= 500:
             response.raise_for_status()
@@ -468,7 +493,7 @@ def scrape_booru(scrapeler_args):
                     image_file_path = "{directory}\\{fn}".format(directory=scrapeler_args['scrape_save_directory'],
                                                                  fn=image_md5)
                     director.job_queue.put(
-                        [scrape_url, image_header_referer_template.format(refer_id), image_file_path]
+                        (scrape_url, image_header_referer_template.format(refer_id), image_file_path)
                     )
                     logger.info('[{}] [QUEUED] [{}] {} was queued for download.'
                                 .format(datetime.datetime.now(), count, image_header_referer_template.format(refer_id)))
@@ -480,16 +505,18 @@ def scrape_booru(scrapeler_args):
                             .format(datetime.datetime.now(), count, image_header_referer_template.format(refer_id),
                                     filter_reasons))
 
+        # with InterruptManager(director=director): # TODO This shit breaks hard on keyboard interrupts
         # Wait for workers to finish before going to the next page, or short circuiting will behave weirdly.
         if director.has_active_workers():
-            logger.info('[{}] [INFO] Waiting for current downloads to finish.'.format(datetime.datetime.now()))
+            logger.info('[{}] [INFO] Waiting for current download(s) to finish.'.format(datetime.datetime.now()))
             updater = 0
             while director.has_active_workers():
                 time.sleep(.1)
                 updater += 1
                 if not (updater % 100):
-                    logger.info('[{}] [INFO] Still working...'
-                                .format(datetime.datetime.now()))
+                    logger.info(
+                        '[{}] [INFO] Still working... ({} Images left in queue, {} active download(s).)'
+                            .format(datetime.datetime.now(), director.job_queue.qsize(), director.get_active_count()))
 
         if not scrapeler_args['scanonly']:
             logger.info('[{}] [PROGRESS] {} images saved for page {}. ({} images saved in total.)'
