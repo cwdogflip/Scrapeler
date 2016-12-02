@@ -196,10 +196,17 @@ class ScrapelerDirector(threading.Thread):
         with self.__worker_lock:
             return len(self._workers)
 
+    def get_pending_job_count(self):
+        return self.__job_queue.qsize()
+
     def queue_work(self, directory_page, subpage_id, image_save_path, hash_id):
         with self.__set_lock:
-            self.__saved_images.add(hash_id)
-        self.__job_queue.put((directory_page, subpage_id, image_save_path))
+            if hash_id not in self.__saved_images:
+                self.__saved_images.add(hash_id)
+                self.__job_queue.put((directory_page, subpage_id, image_save_path))
+            else:
+                logger.info('[{}] [SKIPPED] {} was skipped. Saved previously. ({})'
+                            .format(datetime.datetime.now(), image_header_referer_template.format(subpage_id), hash_id))
 
     def direct(self):
         while not self.quit_event.is_set():
@@ -542,7 +549,7 @@ def scrape_booru(scrapeler_args):
                     if not (updater % 100):
                         logger.info(
                             '[{}] [INFO] Still working... ({} Images left in queue, {} active download(s).)'
-                                .format(datetime.datetime.now(), director.__job_queue.qsize(),
+                                .format(datetime.datetime.now(), director.get_pending_job_count(),
                                         director.get_active_count()))
 
             if not scrapeler_args['scanonly']:
