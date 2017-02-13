@@ -12,19 +12,23 @@ import signal
 import sys
 import threading
 import time
-
-from collections import defaultdict
-from functools import wraps
+import hashlib
+import collections
+import functools
 
 # Attempts at compatibility with Python2.7
 try:
-    import queue as _queue
+    import queue
+    _queue = queue
 except ImportError:
-    import Queue as _queue
+    import Queue
+    queue = None
+    _queue = Queue
 
 try:
     from threading import main_thread
 except ImportError:
+    # main_thread isn't a function in python2. Define it here.
     def main_thread():
         try:
             return main_thread.__mt
@@ -34,13 +38,16 @@ except ImportError:
                     logger.debug('MainThread cached.')
                     main_thread.__mt = t
                     return t
+    t = main_thread()  # Cache now, not later.
+    del t
 
+# Python 2 missing some an we'd like to use.
 try:
-    raise ConnectionRefusedError
+    ConnectionError
 except NameError:
-    ConnectionRefusedError = OSError
-except Exception:
-    pass
+    class ConnectionError(OSError):
+        pass
+
 
 import requests
 from bs4 import BeautifulSoup
@@ -65,10 +72,10 @@ __USER_AGENT__ = UserAgent().firefox
 
 
 # Decorators
-def retry(caught_exceptions=(ConnectionRefusedError, requests.ConnectionError, requests.HTTPError),
+def retry(caught_exceptions=(ConnectionError, requests.ConnectionError, requests.HTTPError),
           max_tries=3, base_delay=16):
     def deco_retry(f):
-        @wraps(f)
+        @functools.wraps(f)
         def f_retry(*args, **kwargs):
             tries_left = max_tries
             current_delay = base_delay + random.uniform(0, 1)
@@ -117,16 +124,14 @@ class InterruptManager(object):
             try:
                 self.old_handler(*self.signal_received)
             except KeyboardInterrupt:
-                thread_prime = main_thread()
-                logger.debug(thread_prime)
-                for thread in threading.enumerate():
-                    if thread is not thread_prime:
-                        thread.join()
+                if self._director:
+                    self._director.join()
                 exit('Scrapeler was interrupted and has stopped.')
 
 
 class ScrapelerDirector(threading.Thread):
     def __init__(self, max_workers=4):
+        logger.debug('Initializing DirectorThread')
         threading.Thread.__init__(self, target=self.direct)
         self.name = 'Thread-ScrapelerDirector'
         self.quit_event = threading.Event()
@@ -149,43 +154,46 @@ class ScrapelerDirector(threading.Thread):
     # Remove dead workers from list.
     def __upkeep(self):
         with self.__worker_lock:
-            for w in self._workers[:]:
-                w.join(.1)
-                # Check for thread still working
-                if not w.is_alive():
-                    if w.saved:
-                        with self.__count_lock:
-                            self.__current_saved_count += 1
-                            self.__total_saved_count += 1
-                    self._workers.remove(w)
-                else:
-                    self.__active_workers_flag.set()
+            if self._workers:
+                for w in self._workers[:]:
+                    # If they don't join quickly, don't block.
+                    w.join(.1)
+                    # If worker is not alive, it must be done working.
+                    if not w.is_alive():
+                        if w.saved:
+                            with self.__count_lock:
+                                self.__current_saved_count += 1
+                                self.__total_saved_count += 1
+                        self._workers.remove(w)
+                    else:  # if w.is_alive
+                        self.__active_workers_flag.set()
+                        logger.debug('Active Worker {} found. Active flag set.'.format(w))
 
-            # Clear worker flag
-            if not self._workers:
+                # Clear worker flag
+                if not self._workers:
+                    self.__active_workers_flag.clear()
+            else:
                 self.__active_workers_flag.clear()
 
     def __assign_work(self):
-        # Fire dead workers first.
-        self.__upkeep()
         with self.__worker_lock:
             # Don't let a director move on without assigning all work it can.
             while not self.__job_queue.empty() and not self.quit_event.is_set():
                 # Don't hire more than max workers
                 if len(self._workers) < self.__max_workers:
-                    new_hire = self.ScrapelerWorker(*self.__job_queue.get())
+                    new_hire = ScrapelerWorker(*self.__job_queue.get())
                     new_hire.start()
                     self._workers.append(new_hire)
                     self.__active_workers_flag.set()
                 else:
                     break
-        time.sleep(.1)
 
     def __signal_quitting_time(self):
         with self.__worker_lock:
             for worker in self._workers:
                 worker.quit_flag.set()
-                worker.quitting_time = datetime.datetime.now()
+                worker.quitting_time = datetime.datetime.now() + datetime.timedelta(seconds=15)
+                logger.debug('{} signalled to stop.'.format(worker))
 
     # called externally to let the director know counts need to be reset.
     def signal_new_page(self):
@@ -216,129 +224,157 @@ class ScrapelerDirector(threading.Thread):
         self.__job_queue.put((directory_page, subpage_id, image_save_path))
 
     def direct(self):
+        logger.debug('DirectorThread - direct started')
         while not self.quit_event.is_set():
+            self.__upkeep()
             self.__assign_work()
+            time.sleep(.1)
 
+        logger.debug('DirectorThread - quit_event set')
         self.__signal_quitting_time()
+
         # Always wait for workers before quitting.
         while self.__active_workers_flag.is_set():
             self.__upkeep()
             time.sleep(.1)
+        logger.debug('DirectorThread - direct end.')
 
-    class ScrapelerWorker(threading.Thread):
-        def __init__(self, *args):
-            threading.Thread.__init__(self, target=self.work)
-            self.__args = args
-            self.saved = 0
-            self.quit_flag = threading.Event()
-            self.start_time = datetime.datetime.now()
-            self.quitting_time = None
-            self.errors = []
 
-        def __str__(self):
-            return self.name
+class ScrapelerWorker(threading.Thread):
+    def __init__(self, *args):
+        threading.Thread.__init__(self, target=self.work)
+        self.__args = args
+        self.saved = 0
+        self.quit_flag = threading.Event()
+        self.start_time = datetime.datetime.now()
+        self.quitting_time = None
+        self.errors = []
+        # self.daemon = True
+        logger.debug('{}:{}'.format(self.name, self.start_time))
 
-        def work(self):
+    def __str__(self):
+        return self.name
+
+    def work(self):
+        try:
+            self.saved = self._route_through_subpage(*self.__args)
+        except Exception as e:
+            logger.info('Download thread failed.')
+            logger.debug(e, *self.__args)
+
+    @retry()
+    def _route_through_subpage(self, directory_page, subpage_id, image_save_path):
+        ret = 0
+        request_headers = {
+            'User-Agent': __USER_AGENT__,
+            'Referer': directory_page,
+        }
+        if not subpage_id.startswith(('http', 'https')):
+            subpage_id = 'https:' + subpage_id
+
+        logger.debug(subpage_id)
+        with requests.Session() as sess:
+            response = sess.get(subpage_id, data=None, headers=request_headers)
+
+        if response.status_code >= 500:
+            response.raise_for_status()
+
+        if not response.status_code == 404:
+            soup = BeautifulSoup(response.content, "html5lib", from_encoding=response.encoding)
             try:
-                self.saved = self._route_through_subpage(*self.__args)
+                img_tag = soup.find('img', id='image')
+                if img_tag is not None:
+                    current_img_src = img_tag.attrs['src']
+                    if 'sample' in current_img_src:
+                        original_url = current_img_src.replace('samples', 'images').replace('sample_', '')
+                        split_url = original_url.split('.')
+                        start = response.text.find('<h5>Options</h5>')
+                        end = response.text[start:].find('>Original')
+                        search_text = response.text[start:start + end]
+                        result = search_text[search_text.find(split_url[1]):]
+                        result = result[:result.find('"')]
+                        current_img_src = split_url[0] + '.' + result
+
+                    extension = re.search(r'(?P<extension>\.(jpg|jpeg|gif|png))',
+                                          current_img_src).group('extension')
+
+                    image_save_path += extension
+                else:
+                    # No need to try to find extensions here.
+                    webm_tag = soup.find('source')
+                    current_img_src = webm_tag.attrs['src']
+                    image_save_path += '.webm'
+
+                delay = random.uniform(4, 6)
+                time.sleep(delay)
+                ret = self._save_image(subpage_id, current_img_src, image_save_path)
+
             except Exception as e:
-                logger.info('Download thread failed.')
-                logger.debug(e, *self.__args)
+                logger.error('Unhandled exception during route_through_subpage: {}'
+                             .format(e))
+                raise e
+        return ret
 
-        @retry()
-        def _route_through_subpage(self, directory_page, subpage_id, image_save_path):
-            ret = 0
-            request_headers = {
-                'User-Agent': __USER_AGENT__,
-                'Referer': directory_page,
-            }
-            with requests.Session() as sess:
-                response = sess.get(subpage_id, data=None, headers=request_headers)
+    # TODO Clean up images that were not completed.
+    def _save_image(self, referencing_subpage_id, current_img, image_save_path):
+        request_headers = {
+            'User-Agent': __USER_AGENT__,
+            'Referer': referencing_subpage_id
+        }
+        if not current_img.startswith(('http', 'https')):
+            current_img = 'http:' + current_img
 
-            if response.status_code >= 500:
-                response.raise_for_status()
+        clean_up = False
+        logger.debug(current_img)
+        with requests.Session() as sess:
+            response = sess.get(current_img, data=None, stream=True, headers=request_headers)
 
-            if not response.status_code == 404:
-                soup = BeautifulSoup(response.content, "html5lib", from_encoding=response.encoding)
+            if response.status_code == 200:
+                _current_md5 = hashlib.md5()
+                logger.debug('{} saving image.'.format(self.name))
                 try:
-                    img_tag = soup.find('img', id='image')
-                    if img_tag is not None:
-                        current_img = img_tag.attrs['src']
-                        if 'sample' in current_img:
-                            original_url = current_img.replace('samples', 'images').replace('sample_', '')
-                            split_url = original_url.split('.')
-                            start = response.text.find('<h5>Options</h5>')
-                            end = response.text[start:].find('>Original')
-                            search_text = response.text[start:start + end]
-                            result = search_text[search_text.find(split_url[1]):]
-                            result = result[:result.find('"')]
-                            current_img = split_url[0] + '.' + result
+                    with open(image_save_path, 'wb') as f:
+                        for chunk in response.iter_content(chunk_size=1024):
+                            if chunk:  # filter out keep-alive new chunks
+                                f.write(chunk)
+                                _current_md5.update(chunk)
 
-                        extension = re.search(r'(?P<extension>\.(jpg|jpeg|gif|png))',
-                                              current_img).group('extension')
+                            now = datetime.datetime.now()
+                            if self.quit_flag.is_set() and self.quitting_time \
+                                    and now >= self.quitting_time:
+                                    logging.info('Thread {} has stopped. {} did not finish.'
+                                                 .format(self.name, image_save_path))
+                                    clean_up = True
+                                    return 0
 
-                        image_save_path += extension
-                    else:
-                        # No need to try to find extensions here.
-                        webm_tag = soup.find('source')
-                        current_img = webm_tag.attrs['src']
-                        image_save_path += '.webm'
+                            if now >= self.start_time + datetime.timedelta(minutes=20):
+                                clean_up = True
+                                raise ConnectionError('Download thread {} was taking too long to execute.'
+                                                      .format(self.name))
 
-                    delay = random.uniform(4, 6)
-                    time.sleep(delay)
-                    ret = self._save_image(subpage_id, current_img, image_save_path)
-
+                        logger.info('[SAVED] {} was saved successfully.'
+                                    .format(current_img))
+                        logger.debug(_current_md5.hexdigest())
+                        return 1
                 except Exception as e:
-                    logger.error('Unhandled exception during route_through_subpage: {}'
-                                 .format(e))
-                    raise e
-            return ret
-
-        @retry()
-        def _save_image(self, referencing_subpage_id, current_img, image_save_path):
-            request_headers = {
-                'User-Agent': __USER_AGENT__,
-                'Referer': referencing_subpage_id
-            }
-            with requests.Session() as sess:
-                response = sess.get(current_img, data=None, stream=True, headers=request_headers)
-
-                if response.status_code == 200:
-                    try:
-                        # TODO Check to make sure image md5 is correct with its filename?
-                        with open(image_save_path, 'wb') as f:
-                            for chunk in response.iter_content(chunk_size=1024):
-                                if chunk:  # filter out keep-alive new chunks
-                                    f.write(chunk)
-
-                                now = datetime.datetime.now()
-                                if self.quit_flag.is_set():
-                                    if now - self.quitting_time > datetime.timedelta(seconds=15):
-                                        logging.info('Thread {} has stopped.'.format(self.name))
-                                        break
-
-                                elif now - self.start_time > datetime.timedelta(minutes=5):
-                                    raise Exception('Download thread {} was taking too long to execute'
-                                                    .format(self.name))
-                                else:
-                                    logging.debug('{} status: {}'
-                                                  .format(self.name, now - datetime.timedelta(minutes=5)))
-
-                            logger.info('[SAVED] {} was saved successfully.'
-                                        .format(current_img))
-                            return 1
-                    except Exception as e:
+                    if isinstance(e, ConnectionError):
+                        raise e
+                    else:
                         logger.error('Unhandled exception during save_image: {}'
                                      .format(e))
+                finally:
+                    if clean_up and os.path.isfile(image_save_path):
+                        os.remove(image_save_path)
 
-                elif response.status_code >= 500:
-                    response.raise_for_status()
-                elif response.status_code == 404:
-                    logger.error('Could not save {}. 404: File Not found.'.format(current_img))
-                    return 0
-                else:
-                    logger.error('Unknown Status code: {}'.format(response.status_code))
+
+            elif response.status_code >= 500:
+                response.raise_for_status()
+            elif response.status_code == 404:
+                logger.error('Could not save {}. 404: File Not found.'.format(current_img))
                 return 0
+            else:
+                logger.error('Unknown Status code: {}'.format(response.status_code))
+            return 0
 
 
 # Shoutout to Dogflip for writing this
@@ -358,7 +394,7 @@ def expand_response_files(raw_args):
 
 def get_dir_or_file_contents(paths):
     temp_list = []
-    if not type(paths) is list:
+    if not isinstance(paths, list):
         paths = [paths]
 
     for p in paths:
@@ -368,12 +404,13 @@ def get_dir_or_file_contents(paths):
                 with open(path, 'r') as file:
                     contents = file.read()
                     temp_list.extend(
-                        contents if type(contents) is list else contents.split()
+                        contents if isinstance(paths, list) else contents.split()
                     )
             elif os.path.isdir(path):
                 files = os.listdir(path)
                 temp_list.extend(files)
             else:
+                # I really have no idea how this would happen
                 raise OSError("Whatever you did, don't do that.")
 
     # Get all of the filename up to the last . e.g.: example.image.name.jpg will return everything but '.jpg'
@@ -397,27 +434,37 @@ def parse_scrapeler_args(batch_args=None):
                         nargs='*', help="If an image has a tag in this list, Scrapeler will not save it.")
     parser.add_argument("-d", "--dir", help="The directory you want the images saved to.", nargs='?')
     parser.add_argument("-p", "--page", type=int, help="Page you want to start the scraping on", default=1, nargs='?')
-    parser.add_argument("-c", "--kwcount", type=int, default=25,
-                        help="The number of counted keywords reported. Defaults to 25. If this is 0, Scrapeler will not count keywords. Set this to -1 to grab all scanned keywords.")
+    parser.add_argument("-c", "--kwcount", type=int, default=0,
+                        help="The number of counted keywords reported. "
+                             "If this is 0, Scrapeler will not count keywords. "
+                             "Set this to -1 to grab all scanned keywords.")
     parser.add_argument("--pagelimit", type=int, default=-1,
-                        help='How many pages to scan before stopping. If below 1, Scrapeler will continue until it finds a page with fewer than maximum images.')
+                        help='How many pages to scan before stopping. If below 1, '
+                             'Scrapeler will continue until it finds a page with fewer than maximum images.')
     parser.add_argument("--scanonly", default=False, action='store_true',
-                        help='If on, images will not be saved, but you still collect keyword data.')
+                        help='If on, images will not be saved, but you can still collect keyword data.')
     parser.add_argument("--shortcircuit", default=False, action='store_true',
-                        help='If on, Scrapeler will stop scraping if it finds nothing on a page that you haven\'t already saved. Does nothing if --scanonly is on.')
+                        help='If on, Scrapeler will stop scraping if it saves nothing on a page. '
+                             'Does nothing if --scanonly is on.')
     parser.add_argument("--batch", default=None, type=argparse.FileType('r'),
                         help="Pass a file that contains additional Scrapeler queries here.")
     parser.add_argument("--blacklist", default=None, type=str, nargs='+',
-                        help='A directory or file, or series of directories and files, that contains images you do not want Scrapeler to save. Scrapeler checks against filenames to do this.')
-    parser.add_argument("--debug", default=False, action='store_true', help=argparse.SUPPRESS)
-    parser.add_argument("--threads", default=4, type=int,
-                        help="The number of downloads Scrapeler will do concurrently.")
+                        help='A directory or file, or series of directories and files, '
+                             'that contains images you do not want Scrapeler to save. '
+                             'Scrapeler checks against filenames to do this.')
+    parser.add_argument("--debug", default=False, action='store_true', help=argparse.SUPPRESS)  # Additional logging
+    parser.add_argument("--threads", default=4, type=int, help=argparse.SUPPRESS)  # Download threads.
 
+    env_debug_flag = os.environ.get('SCRAPELER_DEBUG', False)
     parsed_args = parser.parse_args(expanded_args)
-    if parsed_args.debug:
+    if env_debug_flag or parsed_args.debug:
         logger.setLevel(logging.DEBUG)
+        logger.info('Logging level: DEBUG')
+        if env_debug_flag:
+            logger.info('Debug set through environment.')
     else:
         logger.setLevel(logging.INFO)
+        logger.info('Logging level: INFO')
 
     if parsed_args.dir is not None:
         directory = parsed_args.dir
@@ -433,14 +480,22 @@ def parse_scrapeler_args(batch_args=None):
     else:
         already_saved = get_dir_or_file_contents([save_path])
 
-    include_tags = ''.join('%s+' % x for x in (requests.utils.quote(tag, safe='') for tag in parsed_args.tags))
+    include_tags = ''.join('%s+' % x for x in (requests.utils.quote(tag.lower(), safe='')
+                                               for tag in parsed_args.tags))
 
     if parsed_args.exclude is not None:
-        exclude_tags = ''.join('-%s+' % x for x in (requests.utils.quote(tag, safe='') for tag in parsed_args.exclude))
+        exclude_tags = ''.join('-%s+' % x for x in (requests.utils.quote(tag.lower(), safe='')
+                                                    for tag in parsed_args.exclude))
     else:
         exclude_tags = ''
 
-    filtered_tags = {item: 0 for item in parsed_args.filter} if parsed_args.filter else {}
+    filtered_tags = {item.lower(): 0 for item in parsed_args.filter} if parsed_args.filter else {}
+
+    if parsed_args.scanonly and not parsed_args.kwcount:
+        kwcount = -1
+    else:
+        kwcount = parsed_args.kwcount
+    logger.debug('{} keywords will be saved'.format(kwcount))
 
     scrapeler_args = {
         'tags': parsed_args.tags,
@@ -448,8 +503,8 @@ def parse_scrapeler_args(batch_args=None):
         'filter': filtered_tags,
         'url_tags': (include_tags + exclude_tags)[:-1],
         'scrape_save_directory': save_path,
-        'kwcount': parsed_args.kwcount if parsed_args.kwcount >= -1 else 0,
-        'page': parsed_args.page,
+        'kwcount': kwcount if kwcount >= -1 else 0,
+        'page': parsed_args.page if parsed_args.page > 0 else 1,
         'pagelimit': (parsed_args.pagelimit + parsed_args.page if parsed_args.pagelimit > 0 else -1),
         'scanonly': parsed_args.scanonly,
         'base_delay': 7,
@@ -457,8 +512,8 @@ def parse_scrapeler_args(batch_args=None):
         'batch': parsed_args.batch,
         'blacklist': blacklist,
         'already_saved': already_saved,
-        'debug': parsed_args.debug,
-        'threads': parsed_args.threads,
+        'debug': env_debug_flag or parsed_args.debug,
+        'threads': parsed_args.threads if not (parsed_args.debug or env_debug_flag) else 1,
     }
 
     return scrapeler_args
@@ -481,7 +536,7 @@ def get_soup(url):
 
 
 def scrape_booru(scrapeler_args):
-    related_tags = defaultdict(int)
+    related_tags = collections.defaultdict(int)
     found_imgs = 0
     url_tags = scrapeler_args['url_tags']
 
@@ -492,71 +547,71 @@ def scrape_booru(scrapeler_args):
 
     director = ScrapelerDirector(scrapeler_args['threads'])
     director.start()
+    try:
+        keep_scraping = True
+        while keep_scraping:
+            director.signal_new_page()
 
-    keep_scraping = True
-    while keep_scraping:
-        director.signal_new_page()
+            delay = scrapeler_args['base_delay'] + random.uniform(0, 2)
+            time.sleep(delay)
+            scrape_url = image_directory_template.format(url_tags=url_tags, pid=str(42 * (page - 1)))
+            logger.info(
+                '\n[NEW PAGE] Scraping: {}, (page {})'.format(scrape_url, page))
 
-        delay = scrapeler_args['base_delay'] + random.uniform(0, 2)
-        time.sleep(delay)
-        scrape_url = image_directory_template.format(url_tags=url_tags, pid=str(42 * (page - 1)))
-        logger.info(
-            '\n[NEW PAGE] Scraping: {}, (page {})'.format(scrape_url, page))
+            scrape_soup = get_soup(scrape_url)
+            results = scrape_soup.findAll('img', class_='preview')
 
-        scrape_soup = get_soup(scrape_url)
-        results = scrape_soup.findAll('img', class_='preview')
+            found_imgs += len(results)
+            if len(results) < 42:
+                keep_scraping = False
 
-        found_imgs += len(results)
-        if len(results) < 42:
-            keep_scraping = False
+            logger.info('{} results on page\n'.format(len(results)))
 
-        logger.info('{} results on page\n'.format(len(results)))
+            for count, result in enumerate(results, 1):
+                # Delay the keyboard interrupt until the end of the context
+                with InterruptManager(director=director):
+                    save_current = True
+                    filter_reasons = []
+                    for tag in result.attrs['title'].split():
+                        if 'score' not in tag:
+                            related_tags[tag] += 1
 
-        for count, result in enumerate(results, 1):
-            with InterruptManager(director=director):
-                save_current = True
-                filter_reasons = []
-                for tag in result.attrs['title'].split():
-                    if 'score' not in tag:
-                        related_tags[tag] += 1
+                        if tag in scrapeler_args['filter']:
+                            scrapeler_args['filter'][tag] += 1
+                            save_current = False
+                            filter_reasons.append(tag)
 
-                    if tag in scrapeler_args['filter']:
-                        scrapeler_args['filter'][tag] += 1
-                        save_current = False
-                        filter_reasons.append(tag)
+                    if scrapeler_args['scanonly']:
+                        continue
 
-                if scrapeler_args['scanonly']:
-                    continue
+                    image_md5 = id_regex.search(result.attrs['src']).group('image_md5')
+                    refer_id = referer_id_regex.search(result.attrs['src']).group(0)[1:]
+                    if scrapeler_args['blacklist'] and image_md5 in scrapeler_args['blacklist']:
+                        logger.info('[BLACKLISTED] [{}] {} was filtered. Blacklisted.'
+                                    .format(count, image_md5))
+                        continue
+                    if scrapeler_args['already_saved'] and image_md5 in scrapeler_args['already_saved']:
+                        logger.info(
+                            '[SKIPPED] [{}] {} was skipped. Already saved. ({})'
+                                .format(count, image_header_referer_template.format(refer_id),
+                                        image_md5))
+                        continue
 
-                image_md5 = id_regex.search(result.attrs['src']).group('image_md5')
-                refer_id = referer_id_regex.search(result.attrs['src']).group(0)[1:]
-                if scrapeler_args['blacklist'] and image_md5 in scrapeler_args['blacklist']:
-                    logger.info('[BLACKLISTED] [{}] {} was filtered. Blacklisted.'
-                                .format(count, image_md5))
-                    continue
-                if scrapeler_args['already_saved'] and image_md5 in scrapeler_args['already_saved']:
-                    logger.info(
-                        '[SKIPPED] [{}] {} was skipped. Already saved. ({})'
-                            .format(count, image_header_referer_template.format(refer_id),
-                                    image_md5))
-                    continue
+                    if save_current:
+                        image_file_path = "{directory}\\{fn}".format(directory=scrapeler_args['scrape_save_directory'],
+                                                                     fn=image_md5)
+                        director.queue_work(scrape_url, image_header_referer_template.format(refer_id),
+                                            image_file_path)
+                        logger.info('[QUEUED] [{}] {} was queued for download.'
+                                    .format(count, image_header_referer_template.format(refer_id)))
+                        time.sleep(.8)
 
-                if save_current:
-                    image_file_path = "{directory}\\{fn}".format(directory=scrapeler_args['scrape_save_directory'],
-                                                                 fn=image_md5)
-                    director.queue_work(scrape_url, image_header_referer_template.format(refer_id),
-                                        image_file_path)
-                    logger.info('[QUEUED] [{}] {} was queued for download.'
-                                .format(count, image_header_referer_template.format(refer_id)))
-                    time.sleep(.6)
+                    elif not save_current:
+                        logger.info(
+                            '[FILTERED] [{}] {} was filtered. Matched: {}.'
+                                .format(count, image_header_referer_template.format(refer_id),
+                                        filter_reasons[:4]))
 
-                elif not save_current:
-                    logger.info(
-                        '[FILTERED] [{}] {} was filtered. Matched: {}.'
-                            .format(count, image_header_referer_template.format(refer_id),
-                                    filter_reasons[:4]))
-
-        try:
             if director.has_active_workers():
                 logger.info('Waiting for current download(s) to finish.'.format(datetime.datetime.now()))
                 next_check = datetime.datetime.now() + datetime.timedelta(seconds=10)
@@ -573,6 +628,7 @@ def scrape_booru(scrapeler_args):
                 logger.info('[PROGRESS] {} images saved for page {}. ({} images saved in total.)'
                             .format(director.get_current_saved_count(),
                                     page, director.get_total_saved_count()))
+
             if scrapeler_args['short'] and not scrapeler_args['scanonly'] and director.get_current_saved_count() == 0:
                 logger.info('[DONE] No images saved with on page {} with shortcircuit on. Stopping.'
                             .format(page))
@@ -584,17 +640,15 @@ def scrape_booru(scrapeler_args):
                     '[DONE] Page limit ({}) was reached. Stopping.'.format(final_page))
                 keep_scraping = False
 
-        except KeyboardInterrupt:
-            logger.info('Received interrupt signal. Scrapeler will stop shortly.')
-            director.quit_event.set()
-            thread_prime = main_thread()
-            for thread in threading.enumerate():
-                if thread is not thread_prime:
-                    thread.join()
-            exit('Scrapeler was interrupted and has stopped.')
+    except KeyboardInterrupt:
+        logger.info('Received interrupt signal. Scrapeler will stop shortly.')
+        director.quit_event.set()
+        director.join()
+        exit('Scrapeler was interrupted and has stopped.')
 
     # Out of the loop, tell director it's quitting time.
     director.quit_event.set()
+    director.join()
     return related_tags
 
 
@@ -633,12 +687,12 @@ def perform_gelbooru_scrape(scrapeler_args):
 
 
 def main():
-    scrapeler_args = parse_scrapeler_args()
+    # One of the exception handlers needs this in case someone is really fast on the draw.
+    scrapeler_args = {}
     try:
+        scrapeler_args = parse_scrapeler_args()
         perform_gelbooru_scrape(scrapeler_args)
-    except Exception as ex:
-        logger.error('Unhandled exception {e} occurred during command {c}'.format(e=ex, c=scrapeler_args['tags']))
-    try:
+
         if scrapeler_args['batch']:
             batch_file = scrapeler_args['batch']
             for command in batch_file:
@@ -650,6 +704,8 @@ def main():
                     perform_gelbooru_scrape(parse_scrapeler_args(command))
                 except Exception as ex:
                     logger.error('Unhandled exception {e} occurred during command {c}'.format(e=ex, c=command))
+    except Exception as ex:
+        logger.error('Unhandled exception {e} occurred during command {c}'.format(e=ex, c=scrapeler_args.get('tags')))
     except KeyboardInterrupt:
         exit('Scrapeler was interrupted and has stopped.')
     logger.info('Finished.')
