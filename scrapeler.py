@@ -3,7 +3,10 @@ from __future__ import print_function, unicode_literals, absolute_import
 
 import argparse
 import codecs
+import collections
 import datetime
+import functools
+import hashlib
 import logging
 import os
 import random
@@ -12,16 +15,15 @@ import signal
 import sys
 import threading
 import time
-import hashlib
-import collections
-import functools
 
 # Attempts at compatibility with Python2.7
 try:
     import queue
+
     _queue = queue
 except ImportError:
     import Queue
+
     queue = None
     _queue = Queue
 
@@ -38,6 +40,8 @@ except ImportError:
                     logger.debug('MainThread cached.')
                     main_thread.__mt = t
                     return t
+
+
     t = main_thread()  # Cache now, not later.
     del t
 
@@ -48,15 +52,15 @@ except NameError:
     class ConnectionError(OSError):
         pass
 
-
 import requests
 from bs4 import BeautifulSoup
 from fake_useragent import UserAgent
 
-image_directory_template = r'http://gelbooru.com/index.php?page=post&s=list&tags={url_tags}&pid={pid}'
-image_url_location_template = r'http://gelbooru.com//images/{0}/{1}/{2}'
-image_header_referer_template = r'http://gelbooru.com/index.php?page=post&s=view&id={0}'
+image_directory_template = r'https://gelbooru.com/index.php?page=post&s=list&tags={url_tags}&pid={pid}'
+image_url_location_template = r'https://gelbooru.com//images/{0}/{1}/{2}'
+image_subpage_template = r'https://gelbooru.com/index.php?page=post&s=view&id={0}'
 id_regex = re.compile(r'(?P<image_md5>[\da-fA-F]*)\.(?P<ext>jpg|jpeg|png|gif|webm)')
+image_subpage_id_regex = re.compile(r'(?P<id>[\d]+)')
 referer_id_regex = re.compile(r'\?[\da-f]*')  # \?(?P<refer_id>[\da-f]*)
 
 logger = logging.getLogger()
@@ -68,7 +72,10 @@ logger_stdout.setFormatter(logger_formatter)
 logger_stdout.setLevel(logging.DEBUG)
 logger.addHandler(logger_stdout)
 
-__USER_AGENT__ = UserAgent().firefox
+try:
+    __USER_AGENT__ = UserAgent().firefox
+except Exception as e:
+    __USER_AGENT__ = 'Mozilla/5.0 (compatible, MSIE 11, Windows NT 6.3; Trident/7.0;  rv:11.0) like Gecko'
 
 
 # Decorators
@@ -286,9 +293,12 @@ class ScrapelerWorker(threading.Thread):
                 if img_tag is not None:
                     current_img_src = img_tag.attrs['src']
                     if 'sample' in current_img_src:
-                        original_url = current_img_src.replace('samples', 'images').replace('sample_', '')
+                        original_url = current_img_src \
+                            .replace('samples', 'images') \
+                            .replace('sample_', '') \
+                            .replace('assets2', 'assets')
                         split_url = original_url.split('.')
-                        start = response.text.find('<h5>Options</h5>')
+                        start = response.text.find('Options')
                         end = response.text[start:].find('>Original')
                         search_text = response.text[start:start + end]
                         result = search_text[search_text.find(split_url[1]):]
@@ -315,7 +325,6 @@ class ScrapelerWorker(threading.Thread):
                 raise e
         return ret
 
-    # TODO Clean up images that were not completed.
     def _save_image(self, referencing_subpage_id, current_img, image_save_path):
         request_headers = {
             'User-Agent': __USER_AGENT__,
@@ -342,10 +351,10 @@ class ScrapelerWorker(threading.Thread):
                             now = datetime.datetime.now()
                             if self.quit_flag.is_set() and self.quitting_time \
                                     and now >= self.quitting_time:
-                                    logging.info('Thread {} has stopped. {} did not finish.'
-                                                 .format(self.name, image_save_path))
-                                    clean_up = True
-                                    return 0
+                                logging.info('Thread {} has stopped. {} did not finish.'
+                                             .format(self.name, image_save_path))
+                                clean_up = True
+                                return 0
 
                             if now >= self.start_time + datetime.timedelta(minutes=20):
                                 clean_up = True
@@ -365,7 +374,6 @@ class ScrapelerWorker(threading.Thread):
                 finally:
                     if clean_up and os.path.isfile(image_save_path):
                         os.remove(image_save_path)
-
 
             elif response.status_code >= 500:
                 response.raise_for_status()
@@ -556,7 +564,7 @@ def scrape_booru(scrapeler_args):
             time.sleep(delay)
             scrape_url = image_directory_template.format(url_tags=url_tags, pid=str(42 * (page - 1)))
             logger.info(
-                '\n[NEW PAGE] Scraping: {}, (page {})'.format(scrape_url, page))
+                '[NEW PAGE] Scraping: {}, (page {})'.format(scrape_url, page))
 
             scrape_soup = get_soup(scrape_url)
             results = scrape_soup.findAll('img', class_='preview')
@@ -584,8 +592,13 @@ def scrape_booru(scrapeler_args):
                     if scrapeler_args['scanonly']:
                         continue
 
-                    image_md5 = id_regex.search(result.attrs['src']).group('image_md5')
-                    refer_id = referer_id_regex.search(result.attrs['src']).group(0)[1:]
+                    try:
+                        image_md5 = id_regex.search(result.attrs['src']).group('image_md5')
+                        image_id = image_subpage_id_regex.search(result.attrs['alt']).group('id')
+                    except Exception as e:
+                        logger.info('{}:{} raised attempting to obtain referer_id. Skipping.'
+                                    .format(e.__class__.__name__, e))
+                        continue
                     if scrapeler_args['blacklist'] and image_md5 in scrapeler_args['blacklist']:
                         logger.info('[BLACKLISTED] [{}] {} was filtered. Blacklisted.'
                                     .format(count, image_md5))
@@ -593,23 +606,23 @@ def scrape_booru(scrapeler_args):
                     if scrapeler_args['already_saved'] and image_md5 in scrapeler_args['already_saved']:
                         logger.info(
                             '[SKIPPED] [{}] {} was skipped. Already saved. ({})'
-                                .format(count, image_header_referer_template.format(refer_id),
+                                .format(count, image_subpage_template.format(image_id),
                                         image_md5))
                         continue
 
                     if save_current:
                         image_file_path = "{directory}\\{fn}".format(directory=scrapeler_args['scrape_save_directory'],
                                                                      fn=image_md5)
-                        director.queue_work(scrape_url, image_header_referer_template.format(refer_id),
+                        director.queue_work(scrape_url, image_subpage_template.format(image_id),
                                             image_file_path)
                         logger.info('[QUEUED] [{}] {} was queued for download.'
-                                    .format(count, image_header_referer_template.format(refer_id)))
+                                    .format(count, image_subpage_template.format(image_id)))
                         time.sleep(.8)
 
                     elif not save_current:
                         logger.info(
                             '[FILTERED] [{}] {} was filtered. Matched: {}.'
-                                .format(count, image_header_referer_template.format(refer_id),
+                                .format(count, image_subpage_template.format(image_id),
                                         filter_reasons[:4]))
 
             if director.has_active_workers():
