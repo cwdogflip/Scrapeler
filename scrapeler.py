@@ -16,6 +16,19 @@ import sys
 import threading
 import time
 
+import requests
+from bs4 import BeautifulSoup
+from fake_useragent import UserAgent
+
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+logger_formatter = logging.Formatter('[%(asctime)s]::[%(levelname)s] - %(message)s')
+
+logger_stdout = logging.StreamHandler(sys.stdout)
+logger_stdout.setFormatter(logger_formatter)
+logger_stdout.setLevel(logging.DEBUG)
+logger.addHandler(logger_stdout)
+
 # Attempts at compatibility with Python2.7
 try:
     import queue
@@ -42,19 +55,14 @@ except ImportError:
                     return t
 
 
-    t = main_thread()  # Cache now, not later.
-    del t
+    main_thread()  # Cache now, not later.
 
-# Python 2 missing some an we'd like to use.
+# Python 2 missing an exception we'd like to use.
 try:
     ConnectionError
 except NameError:
     class ConnectionError(OSError):
         pass
-
-import requests
-from bs4 import BeautifulSoup
-from fake_useragent import UserAgent
 
 image_directory_template = r'https://gelbooru.com/index.php?page=post&s=list&tags={url_tags}&pid={pid}'
 image_url_location_template = r'https://gelbooru.com//images/{0}/{1}/{2}'
@@ -63,19 +71,10 @@ id_regex = re.compile(r'(?P<image_md5>[\da-fA-F]*)\.(?P<ext>jpg|jpeg|png|gif|web
 image_subpage_id_regex = re.compile(r'(?P<id>[\d]+)')
 referer_id_regex = re.compile(r'\?[\da-f]*')  # \?(?P<refer_id>[\da-f]*)
 
-logger = logging.getLogger()
-logger.setLevel(logging.INFO)
-logger_formatter = logging.Formatter('[%(asctime)s]::[%(levelname)s] - %(message)s')
-
-logger_stdout = logging.StreamHandler(sys.stdout)
-logger_stdout.setFormatter(logger_formatter)
-logger_stdout.setLevel(logging.DEBUG)
-logger.addHandler(logger_stdout)
-
 try:
-    __USER_AGENT__ = UserAgent().firefox
+    USER_AGENT = UserAgent().firefox
 except Exception as e:
-    __USER_AGENT__ = 'Mozilla/5.0 (compatible, MSIE 11, Windows NT 6.3; Trident/7.0;  rv:11.0) like Gecko'
+    USER_AGENT = 'Mozilla/5.0 (compatible, MSIE 11, Windows NT 6.3; Trident/7.0;  rv:11.0) like Gecko'
 
 
 # Decorators
@@ -174,7 +173,7 @@ class ScrapelerDirector(threading.Thread):
                         self._workers.remove(w)
                     else:  # if w.is_alive
                         self.__active_workers_flag.set()
-                        logger.debug('Active Worker {} found. Active flag set.'.format(w))
+                        # logger.debug('Active Worker {} found. Active flag set.'.format(w))
 
                 # Clear worker flag
                 if not self._workers:
@@ -267,16 +266,16 @@ class ScrapelerWorker(threading.Thread):
             self.saved = self._route_through_subpage(*self.__args)
         except Exception as e:
             logger.info('Download thread failed.')
-            logger.debug(e, *self.__args)
+            logger.debug('{}: {}'.format(e, *self.__args))
 
     @retry()
     def _route_through_subpage(self, directory_page, subpage_id, image_save_path):
         ret = 0
         request_headers = {
-            'User-Agent': __USER_AGENT__,
+            'User-Agent': USER_AGENT,
             'Referer': directory_page,
         }
-        if not subpage_id.startswith(('http', 'https')):
+        if not subpage_id.startswith(('http:', 'https:')):
             subpage_id = 'https:' + subpage_id
 
         logger.debug(subpage_id)
@@ -305,7 +304,7 @@ class ScrapelerWorker(threading.Thread):
                         result = result[:result.find('"')]
                         current_img_src = split_url[0] + '.' + result
 
-                    extension = re.search(r'(?P<extension>\.(jpg|jpeg|gif|png))',
+                    extension = re.search(r'(?P<extension>\.(jpg|jpeg|gif|png))$',
                                           current_img_src).group('extension')
 
                     image_save_path += extension
@@ -327,16 +326,20 @@ class ScrapelerWorker(threading.Thread):
 
     def _save_image(self, referencing_subpage_id, current_img, image_save_path):
         request_headers = {
-            'User-Agent': __USER_AGENT__,
+            'User-Agent': USER_AGENT,
             'Referer': referencing_subpage_id
         }
-        if not current_img.startswith(('http', 'https')):
-            current_img = 'http:' + current_img
+        requested_page = current_img
+        if 'gelbooru.com' not in current_img:
+            requested_page = 'https://gelbooru.com{}'.format(current_img)
+
+        elif not current_img.startswith(('http:', 'https:')):
+            requested_page = 'https:{}'.format(current_img)
 
         clean_up = False
         logger.debug(current_img)
         with requests.Session() as sess:
-            response = sess.get(current_img, data=None, stream=True, headers=request_headers)
+            response = sess.get(requested_page, data=None, stream=True, headers=request_headers)
 
             if response.status_code == 200:
                 _current_md5 = hashlib.md5()
@@ -531,7 +534,7 @@ def parse_scrapeler_args(batch_args=None):
 def get_soup(url):
     with requests.Session() as sess:
         response = sess.get(url, data=None, headers={
-            'User-Agent': __USER_AGENT__,
+            'User-Agent': USER_AGENT,
             'Accept': '''text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8''',
             'Connection': 'keep-alive',
         })
@@ -593,7 +596,7 @@ def scrape_booru(scrapeler_args):
                         continue
 
                     try:
-                        image_md5 = id_regex.search(result.attrs['src']).group('image_md5')
+                        image_md5 = id_regex.search(result.attrs['data-original']).group('image_md5')
                         image_id = image_subpage_id_regex.search(result.attrs['alt']).group('id')
                     except Exception as e:
                         logger.info('{}:{} raised attempting to obtain referer_id. Skipping.'
